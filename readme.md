@@ -2,19 +2,42 @@
 
 Small Conversational speech models that can run on device
 
-# Installation
+# Run Locally
 
+Create environment:
 ```sh
-uv pip install -e .
+uv venv --python=3.12
 ```
-
-# Demo
-
-[Try on Gradio](https://huggingface.co/spaces/fluxions/vui-space)
-
+Activate environment:
+```sh
+source .venv/bin/activate  # or .venv\Scripts\activate on Windows
+```
+Install core dependencies:
+```sh
+uv pip install -e . --link-mode=copy
+```
+(Windows only) Install Triton:
+```sh
+uv pip install triton_windows --link-mode=copy
+```
+(Optional) Install latest PyTorch (CUDA 12.6):
+```sh
+uv pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126 --link-mode=copy
+```
+Authenticate with Hugging Face:
+```sh
+huggingface-cli login
+```
+Finally, run the demo:
 ```sh
 python demo.py
-````
+```
+*Before running `demo.py`, you must accept model terms for [Voice Activity Detection](https://huggingface.co/pyannote/voice-activity-detection) and [Segmentation](https://huggingface.co/pyannote/segmentation) on Hugging Face.*
+
+# Live Demo
+[Try on Gradio](https://huggingface.co/spaces/fluxions/vui-space)
+
+
 
 # Models
 
@@ -56,3 +79,4 @@ fluac is a audio tokenizer based on descript-audio-codec which reduces the numbe
   year = {2025}
 }
 ```
+
