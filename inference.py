@@ -9,4 +9,4 @@ waveform = render(
     "Hey, here is some random stuff, usually something quite long as the shorter the text the less likely the model can cope!",
 )
 print(waveform.shape)
-torchaudio.save("out.opus", waveform[0], 22050)
+torchaudio.save("out.wav", waveform[0], 22050)
