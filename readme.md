@@ -7,7 +7,7 @@ Small Conversational speech models that can run on device
 ```sh
 uv pip install -e .
 ```
-
+For help with installation on Windows, please check this [guide](https://github.com/fluxions-ai/vui/issues/4#issuecomment-2971853482).
 # Demo
 
 [Try on Gradio](https://huggingface.co/spaces/fluxions/vui-space)
