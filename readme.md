@@ -48,7 +48,7 @@ fluac is a audio tokenizer based on descript-audio-codec which reduces the numbe
 
 1) Was developed with on two 4090's https://x.com/harrycblum/status/1752698806184063153
 2) Hallucinations: yes the model does hallucinate, but this is the best I could do with limited resources! :(
-3) VAD does slow things down but needed to help remove areas of silence. We use Silero VAD for voice activity detection - it's lightweight and doesn't require authentication.
+3) VAD does slow things down but needed to help remove areas of silence. We use Silero VAD for voice activity detection.
 
 # Attributions
 
