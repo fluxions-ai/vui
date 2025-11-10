@@ -19,32 +19,42 @@ def detect_voice_activity(waveform, pipe=None):
     waveform = waveform.flatten().float()
     global pipeline
 
+    # Load model and utils if not already loaded
     if pipe is not None:
         pipeline = pipe
     elif pipeline is None:
-        # Load Silero VAD model
+        # Load Silero VAD model and utilities
+        # Returns: (model, utils) where utils = (get_speech_timestamps, save_audio, read_audio, VADIterator, collect_chunks)
         model, utils = torch.hub.load(
             repo_or_dir='snakers4/silero-vad',
             model='silero_vad',
             force_reload=False,
             onnx=False
         )
-        pipeline = model
+        pipeline = {'model': model, 'utils': utils}
+
+    # Extract model and get_speech_timestamps function
+    if isinstance(pipeline, dict):
+        model = pipeline['model']
+        get_speech_timestamps = pipeline['utils'][0]
+    else:
+        # Fallback for backward compatibility if pipe is just a model
+        model = pipeline
+        _, utils = torch.hub.load(
+            repo_or_dir='snakers4/silero-vad',
+            model='silero_vad',
+            force_reload=False,
+            onnx=False
+        )
+        get_speech_timestamps = utils[0]
 
     # Silero VAD expects 16kHz audio
     sample_rate = 16000
 
     # Get speech timestamps
-    get_speech_timestamps = torch.hub.load(
-        repo_or_dir='snakers4/silero-vad',
-        model='silero_vad',
-        force_reload=False,
-        onnx=False
-    )[1]
-
     speech_timestamps = get_speech_timestamps(
         waveform,
-        pipeline,
+        model,
         sampling_rate=sample_rate,
         return_seconds=False  # Returns in samples
     )
