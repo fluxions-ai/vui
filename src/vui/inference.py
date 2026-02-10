@@ -436,9 +436,10 @@ def _generate_impl(
 
             prev_offset = offset
 
-            first_yield = yield_every // 2
-            steps_done = offset - start_offset_sequence
-            should_yield = (steps_done == first_yield) or (steps_done > first_yield and (steps_done - first_yield) % yield_every == 0)
+            if yield_every:
+                first_yield = yield_every // 2
+                steps_done = offset - start_offset_sequence
+                should_yield = (steps_done == first_yield) or (steps_done > first_yield and (steps_done - first_yield) % yield_every == 0)
             if yield_every and should_yield:
                 out_codes, _, _ = pattern.revert_pattern_sequence(sequence, special_token=unknown_token)
                 out_codes = out_codes[..., prompt_codes.shape[-1]:offset]

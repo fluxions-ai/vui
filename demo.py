@@ -180,6 +180,7 @@ PLAYER_JS = """
         sources = [];
         lastGenId = null;
         lastChunkId = -1;
+        pollLast = '';
         if (!ctx || ctx.state === 'closed') {
             ctx = new AudioContext();
         }
@@ -187,6 +188,9 @@ PLAYER_JS = """
             ctx.resume();
         }
         nextTime = ctx.currentTime;
+        document.querySelectorAll('audio').forEach(function(a) {
+            a.pause(); a.currentTime = 0;
+        });
     };
 
     function playChunk(data) {
@@ -246,24 +250,6 @@ PLAYER_JS = """
         }
     });
 
-    // Auto-play for Full button audio output
-    var observer = new MutationObserver(function(mutations) {
-        mutations.forEach(function(mutation) {
-            if (mutation.type === 'childList') {
-                document.querySelectorAll('audio').forEach(function(audio) {
-                    if (audio.src && !audio.dataset.autoplaySet) {
-                        audio.dataset.autoplaySet = 'true';
-                        audio.addEventListener('loadeddata', function() {
-                            setTimeout(function() {
-                                audio.play().catch(function() {});
-                            }, 100);
-                        });
-                    }
-                });
-            }
-        });
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
 })();
 </script>
 """
@@ -272,7 +258,7 @@ with gr.Blocks(title="Vui", theme=gr.themes.Soft(), head=PLAYER_JS) as demo:
     with gr.Row():
         with gr.Column(scale=1):
             audio_chunk = gr.Textbox(visible=False, elem_id="vui-chunk")
-            audio_output = gr.Audio(label=None, type="numpy", autoplay=True)
+            audio_output = gr.Audio(label=None, type="numpy", autoplay=False)
             log_output = gr.Textbox(label=None, lines=4, interactive=False, value=get_log())
             # audio_input = gr.Audio(
             #     label="Voice prompt (optional, up to 30s)",
@@ -333,8 +319,10 @@ with gr.Blocks(title="Vui", theme=gr.themes.Soft(), head=PLAYER_JS) as demo:
         top_p_val = p if use_p else None
         t1 = time.perf_counter()
         gen_id = str(int(t1 * 1000))
-        log(f"Streaming [{current_model_name}]...")
-        for i, (sr, audio) in enumerate(
+        all_audio = []
+        sr = None
+        yield gr.skip(), gr.skip(), None
+        for i, (chunk_sr, audio) in enumerate(
             stream_render(
                 current_model,
                 text,
@@ -344,22 +332,33 @@ with gr.Blocks(title="Vui", theme=gr.themes.Soft(), head=PLAYER_JS) as demo:
                 max_secs=int(duration),
             )
         ):
+            sr = chunk_sr
+            all_audio.append(audio)
             b64 = base64.b64encode(audio.astype(np.float32).tobytes()).decode()
-            yield f"{gen_id}:{i}:{sr}:{b64}", get_log()
+            total_secs = sum(len(a) for a in all_audio) / sr
+            elapsed = time.perf_counter() - t1
+            progress = f"Streaming [{current_model_name}] {total_secs:.1f}s generated ({elapsed:.1f}s elapsed)"
+            yield f"{gen_id}:{i}:{sr}:{b64}", progress, gr.skip()
+
         elapsed = time.perf_counter() - t1
-        yield "", log(f"Streamed in {elapsed:.1f}s [{current_model_name}]")
+        if all_audio and sr:
+            full_audio = np.concatenate(all_audio)
+            total_secs = len(full_audio) / sr
+            yield "", log(f"Done: {total_secs:.1f}s in {elapsed:.1f}s ({total_secs/elapsed:.1f}x RT) [{current_model_name}]"), (sr, full_audio)
+        else:
+            yield "", log("No audio generated"), gr.skip()
 
     gen_event = generate_btn.click(
         fn=generate_wrapper,
         inputs=[text_input, temperature, top_k, use_top_p, top_p, max_duration],
-        outputs=[audio_chunk, log_output],
+        outputs=[audio_chunk, log_output, audio_output],
         js="(...a) => { window.vuiPrepare && window.vuiPrepare(); return a; }",
         cancels=[],
     )
     submit_event = text_input.submit(
         fn=generate_wrapper,
         inputs=[text_input, temperature, top_k, use_top_p, top_p, max_duration],
-        outputs=[audio_chunk, log_output],
+        outputs=[audio_chunk, log_output, audio_output],
         js="(...a) => { window.vuiPrepare && window.vuiPrepare(); return a; }",
         cancels=[],
     )
