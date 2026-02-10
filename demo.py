@@ -105,41 +105,33 @@ def text_to_speech(
 
     print(f"Generating speech for: {text[:50]}... using model {current_model_name}")
 
-    prompt_codes = None
-    prompt_text = ""
-    if prompt_audio is not None:
-        sr, audio = prompt_audio
-
-        audio = torch.from_numpy(audio).float()
-        audio = audio / audio.abs().max()
-        if len(audio.shape) > 1:
-            audio = audio.mean(1)
-
-        codec_sr = current_model.codec.config.sample_rate
-        max_samples = int(30 * codec_sr)
-        if len(audio) > max_samples:
-            audio = audio[:max_samples]
-
-        sf.write("prompt_audio.wav", audio.numpy(), sr)
-        print(audio.shape)
-
-        if sr != codec_sr:
-            audio = julius.resample_frac(audio, sr, codec_sr)
-
-        with torch.inference_mode():
-            audio = audio[None, None]
-            prompt_codes = current_model.codec.encode(audio.cuda())
-
-        prompt_text = asr(julius.resample_frac(audio.flatten(), codec_sr, 16000))
-        print("PROMPT_TEXT", prompt_text)
-        print(f"Using audio prompt with shape: {prompt_codes.shape}")
+    # prompt_codes = None
+    # prompt_text = ""
+    # if prompt_audio is not None:
+    #     sr, audio = prompt_audio
+    #     audio = torch.from_numpy(audio).float()
+    #     audio = audio / audio.abs().max()
+    #     if len(audio.shape) > 1:
+    #         audio = audio.mean(1)
+    #     codec_sr = current_model.codec.config.sample_rate
+    #     max_samples = int(30 * codec_sr)
+    #     if len(audio) > max_samples:
+    #         audio = audio[:max_samples]
+    #     sf.write("prompt_audio.wav", audio.numpy(), sr)
+    #     print(audio.shape)
+    #     if sr != codec_sr:
+    #         audio = julius.resample_frac(audio, sr, codec_sr)
+    #     with torch.inference_mode():
+    #         audio = audio[None, None]
+    #         prompt_codes = current_model.codec.encode(audio.cuda())
+    #     prompt_text = asr(julius.resample_frac(audio.flatten(), codec_sr, 16000))
+    #     print("PROMPT_TEXT", prompt_text)
+    #     print(f"Using audio prompt with shape: {prompt_codes.shape}")
 
     t1 = time.perf_counter()
-    print(prompt_text + text)
     result = render(
         current_model,
-        (prompt_text + " " + text).strip(),
-        prompt_codes=prompt_codes,
+        text,
         temperature=temperature,
         top_k=top_k,
         top_p=top_p,
@@ -282,12 +274,12 @@ with gr.Blocks(title="Vui", theme=gr.themes.Soft(), head=PLAYER_JS) as demo:
             audio_chunk = gr.Textbox(visible=False, elem_id="vui-chunk")
             audio_output = gr.Audio(label=None, type="numpy", autoplay=True)
             log_output = gr.Textbox(label=None, lines=4, interactive=False, value=get_log())
-            audio_input = gr.Audio(
-                label="Voice prompt (optional, up to 30s)",
-                type="numpy",
-                format="wav",
-                waveform_options={"sample_rate": 22050},
-            )
+            # audio_input = gr.Audio(
+            #     label="Voice prompt (optional, up to 30s)",
+            #     type="numpy",
+            #     format="wav",
+            #     waveform_options={"sample_rate": 22050},
+            # )
 
         with gr.Column(scale=2):
             model_dropdown = gr.Dropdown(
@@ -374,15 +366,13 @@ with gr.Blocks(title="Vui", theme=gr.themes.Soft(), head=PLAYER_JS) as demo:
     gen_event.cancels = [gen_event, submit_event]
     submit_event.cancels = [gen_event, submit_event]
 
-    def full_wrapper(text, prompt_audio, temp, k, use_p, p, duration):
+    def full_wrapper(text, temp, k, use_p, p, duration):
         top_p_val = p if use_p else None
-        if prompt_audio is not None and current_model_name != "BASE":
-            change_model("BASE")
-        return text_to_speech(text, prompt_audio, temp, int(k), top_p_val, int(duration))
+        return text_to_speech(text, None, temp, int(k), top_p_val, int(duration))
 
     full_btn.click(
         fn=full_wrapper,
-        inputs=[text_input, audio_input, temperature, top_k, use_top_p, top_p, max_duration],
+        inputs=[text_input, temperature, top_k, use_top_p, top_p, max_duration],
         outputs=[audio_output, log_output],
         cancels=[gen_event, submit_event],
     )
@@ -390,4 +380,4 @@ with gr.Blocks(title="Vui", theme=gr.themes.Soft(), head=PLAYER_JS) as demo:
     demo.load(fn=lambda: SAMPLE_TEXTS[1], outputs=text_input)
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", share=True)
+    demo.launch(server_name="0.0.0.0", server_port=7860, share=True)
