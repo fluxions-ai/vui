@@ -15,27 +15,30 @@ dependencies = [
     "gradio==5.33.0",
     "numba==0.61.2",
     "numpy>=1.24.0",
-    "openai-whisper>=20231117",
+    # "openai-whisper>=20231117",
     "pydantic==2.11.5",
-    "pyannote.audio==3.3.2",
     "soundfile==0.13.1",
     "tiktoken==0.9.0",
-    "torch==2.7.1",
-    "torchaudio==2.7.1",
-    "torchvision==0.22.1",
+    "julius",
+    "torch>=2.10.0",
+    "torchcodec>=0.10.0",
     "transformers==4.52.4",
 ]
 
+[tool.uv]
+override-dependencies = [
+    "torch>=2.10",
+]
+
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 ignore-error-codes = [403]
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchaudio = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
+torch = { index = "pytorch-cu130" }
+torchcodec = { index = "pytorch-cu130" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

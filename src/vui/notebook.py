@@ -3,11 +3,12 @@ import torch
 
 
 def play(audio: torch.Tensor | np.ndarray | str, sr=16000, autoplay=True):
-    import torchaudio
     from IPython.display import Audio, display
+    from torchcodec.decoders import AudioDecoder
 
     if isinstance(audio, str):
-        audio = torchaudio.load(audio)
+        samples = AudioDecoder(audio, sample_rate=sr, num_channels=1).get_all_samples()
+        audio = samples.data
     if isinstance(audio, np.ndarray):
         audio = torch.from_numpy(audio)
 
