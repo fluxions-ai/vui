@@ -267,7 +267,6 @@ def _generate_impl(
     use_cuda_graph: bool,
     yield_every: int | None,
 ):
-    text = simple_clean(text)
     with (
         _model_lock,
         torch.inference_mode(),
