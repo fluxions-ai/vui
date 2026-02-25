@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vui"
-description = "Voice user interfaces"
+description = "Vui: 100M parameter lightweight conversational text-to-speech model with breaths, laughter, and multi-speaker support"
 dynamic = ["version"]
 
 requires-python = "==3.12.3"
