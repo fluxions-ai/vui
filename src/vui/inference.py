@@ -2,6 +2,7 @@ import io
 import re
 import threading
 import time
+from contextlib import nullcontext
 
 import inflect
 import julius
@@ -17,6 +18,24 @@ from vui.vad import detect_voice_activity as vad
 
 _prefill_cache = {}
 _model_lock = threading.Lock()
+
+
+def _inference_dtype(device: torch.device):
+    return torch.bfloat16 if device.type == "cuda" else torch.float32
+
+
+def _autocast_context(device: torch.device):
+    if device.type == "cuda":
+        return torch.autocast("cuda", torch.bfloat16, True)
+    return nullcontext()
+
+
+def _sdpa_context(device: torch.device):
+    if device.type == "cuda":
+        return sdpa_kernel(
+            [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]
+        )
+    return sdpa_kernel(SDPBackend.MATH)
 
 
 def ensure_spaces_around_tags(text: str):
@@ -147,6 +166,9 @@ def simple_clean(text):
 
 def _capture_decode_graph(self: Vui, B: int, Q: int, device):
     """Capture a CUDA graph for single-token decode: embeddings -> decoder -> audio heads."""
+    if device.type != "cuda":
+        raise RuntimeError("CUDA graphs are only supported on CUDA devices")
+
     codebook_size = self.config.model.codebook_size + 8
 
     # Static input buffers
@@ -154,7 +176,9 @@ def _capture_decode_graph(self: Vui, B: int, Q: int, device):
     static_input_pos = torch.zeros(1, dtype=torch.long, device=device)
 
     # Static output buffer
-    static_logits = torch.empty(B, Q, codebook_size, device=device, dtype=torch.bfloat16)
+    static_logits = torch.empty(
+        B, Q, codebook_size, device=device, dtype=_inference_dtype(device)
+    )
 
     def _decode_step():
         emb = sum(self.audio_embeddings[q](static_codes[:, q]) for q in range(Q)) / Q
@@ -198,14 +222,15 @@ def precompute_text(self: Vui, text: str):
         return
 
     try:
+        device = self.device
+        dtype = _inference_dtype(device)
         with (
             torch.inference_mode(),
-            torch.autocast("cuda", torch.bfloat16, True),
-            sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]),
+            _autocast_context(device),
+            _sdpa_context(device),
         ):
-            device = self.device
             Q = self.config.model.n_quantizers
-            self.decoder.allocate_inference_cache(1, device, torch.bfloat16)
+            self.decoder.allocate_inference_cache(1, device, dtype)
 
             encoded = self.tokenizer([text], padding="longest", return_tensors="pt")
             input_ids = encoded.input_ids.to(device)
@@ -267,16 +292,19 @@ def _generate_impl(
     use_cuda_graph: bool,
     yield_every: int | None,
 ):
+    device = self.device
+    dtype = _inference_dtype(device)
+    use_cuda_graph = use_cuda_graph and device.type == "cuda"
+
     with (
         _model_lock,
         torch.inference_mode(),
-        torch.autocast("cuda", torch.bfloat16, True),
-        sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]),
+        _autocast_context(device),
+        _sdpa_context(device),
     ):
         t1 = time.perf_counter()
         batch_size = 1
-        device = self.device
-        self.decoder.allocate_inference_cache(batch_size, device, torch.bfloat16)
+        self.decoder.allocate_inference_cache(batch_size, device, dtype)
 
         B = batch_size
         Q = self.config.model.n_quantizers
@@ -577,9 +605,10 @@ def stream_render(
     max_gen_len = int(self.codec.hz * max_secs)
 
     t0 = time.perf_counter()
+    use_cuda_graph = self.device.type == "cuda"
     gen = generate(
         self, text, prompt_codes, temperature, top_k, top_p,
-        max_gen_len, use_cuda_graph=True, yield_every=yield_every,
+        max_gen_len, use_cuda_graph=use_cuda_graph, yield_every=yield_every,
     )
 
     OVERLAP = 5
@@ -607,15 +636,19 @@ def stream_render(
             chunk_codes = F.pad(chunk_codes, (0, DECODE_LEN - actual_len))
 
         with torch.inference_mode():
-            if codec_graph is None:
+            if self.device.type == "cuda":
+                if codec_graph is None:
+                    static_codec_input = chunk_codes.clone()
+                    self.codec.from_indices(static_codec_input)
+                    codec_graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(codec_graph):
+                        static_codec_output = self.codec.from_indices(static_codec_input)
+                static_codec_input.copy_(chunk_codes)
+                codec_graph.replay()
+                audio = static_codec_output
+            else:
                 static_codec_input = chunk_codes.clone()
-                self.codec.from_indices(static_codec_input)
-                codec_graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(codec_graph):
-                    static_codec_output = self.codec.from_indices(static_codec_input)
-            static_codec_input.copy_(chunk_codes)
-            codec_graph.replay()
-            audio = static_codec_output
+                audio = self.codec.from_indices(static_codec_input)
 
         valid_samples = actual_len * SAMPLES_PER_CODE
         skip = (prev_code_len - decode_start) * SAMPLES_PER_CODE if prev_code_len > 0 else 0

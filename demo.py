@@ -31,6 +31,23 @@ current_model = None
 current_model_name = None
 
 
+def get_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def clear_device_cache(device):
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    elif device.type == "mps":
+        torch.mps.empty_cache()
+        torch.mps.synchronize()
+
+
 def load_and_warm_model(model_name):
     global current_model, current_model_name
 
@@ -40,11 +57,13 @@ def load_and_warm_model(model_name):
 
     print(f"Loading model {model_name}...")
     if current_model is not None:
+        device = current_model.device
         del current_model
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        clear_device_cache(device)
     model_path = AVAILABLE_MODELS[model_name]
-    model = Vui.from_pretrained_inf(model_path).cuda()
+    device = get_device()
+    model = Vui.from_pretrained_inf(model_path).to(device)
+    print(f"Using device: {device}")
 
     print(f"Warming up model {model_name}...")
     warmup_text = "Hello, this is a warmup test, just saying some random stuff to make sure everything is working properly."
