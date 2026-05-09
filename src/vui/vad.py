@@ -1,29 +1,22 @@
 import torch
 
 _model = None
-_JIT_PATH = None
 
 
 def _load():
-    global _model, _JIT_PATH
+    global _model
     if _model is not None:
         return _model
 
-    import os
-    hub_dir = os.path.join(torch.hub.get_dir(), "snakers4_silero-vad_master")
-    jit_path = os.path.join(hub_dir, "src", "silero_vad", "data", "silero_vad.jit")
-
-    if not os.path.exists(jit_path):
-        torch.hub.download_url_to_file(
-            "https://github.com/snakers4/silero-vad/zipball/master",
-            os.path.join(torch.hub.get_dir(), "master.zip"),
-        )
-        import zipfile
-        with zipfile.ZipFile(os.path.join(torch.hub.get_dir(), "master.zip")) as z:
-            z.extractall(torch.hub.get_dir())
-
-    _model = torch.jit.load(jit_path, map_location="cpu")
-    _model.eval()
+    _model, _ = torch.hub.load(
+        repo_or_dir="snakers4/silero-vad",
+        model="silero_vad",
+        onnx=True,
+        force_onnx_cpu=True,
+        trust_repo=True,
+    )
+    if hasattr(_model, "eval"):
+        _model.eval()
     return _model
 
 
