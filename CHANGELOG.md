@@ -13,7 +13,7 @@ streaming conversational voice assistant.
 ### Added
 
 - **Vui Nano (300M)** — new flagship model. Llama-style decoder + RQ-Transformer
-  head over the Qwen3-TTS-12Hz codec. bf16 inference, CUDA graphs, ~5× realtime
+  head over the Qwen3-TTS-12Hz codec. bf16 inference, CUDA graphs, ~9× realtime
   streaming on a 4090.
 - **Streaming server** (`python -m vui.serving.stream`) — WebRTC + WebSocket
   pipeline (ASR → LLM → TTS) with browser UI, VAD-driven turn-taking,
