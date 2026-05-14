@@ -57,13 +57,7 @@ RENDER_MODE = _args.render
 if RENDER_MODE and __name__ == "__main__":
     from vui.demo.cli import run as cli_run
 
-    checkpoint_path = _args.checkpoint
-    if not checkpoint_path:
-        CACHE_DIR = Path.home() / ".cache" / "vui"
-        _lc = CACHE_DIR / "last_checkpoint"
-        if _lc.exists():
-            checkpoint_path = _lc.read_text().strip() or None
-    assert checkpoint_path, "No checkpoint. Pass as arg or load one previously."
+    checkpoint_path = _args.checkpoint or "vui-nano.safetensors"
     render_text = " ".join(_args.text) if _args.text else None
     overrides = {}
     if _args.temperature is not None:
@@ -282,7 +276,6 @@ if USE_MLX:
 
 CACHE_DIR = Path.home() / ".cache" / "vui"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-LAST_CKPT_FILE = CACHE_DIR / "last_checkpoint"
 SETTINGS_FILE = CACHE_DIR / "demo_settings.json"
 
 DEFAULTS = {
@@ -325,23 +318,11 @@ def _save_settings(**kwargs):
 S = _load_settings()
 
 
-def _save_last_ckpt(path: str):
-    LAST_CKPT_FILE.write_text(path.strip())
-
-
-def _load_last_ckpt() -> str | None:
-    if LAST_CKPT_FILE.exists():
-        t = LAST_CKPT_FILE.read_text().strip()
-        return t if t else None
-    return None
-
-
-checkpoint_path = _args.checkpoint or _load_last_ckpt() or "vui-nano.safetensors"
+checkpoint_path = _args.checkpoint or "vui-nano.safetensors"
 
 from vui.hf import download
 
 checkpoint_path = download(checkpoint_path)
-_save_last_ckpt(checkpoint_path)
 
 codec_enc = codec_dec = None
 spk_enc = None
@@ -1097,7 +1078,6 @@ def load_new_checkpoint(ckpt_path):
             with _engine.new_row() as _wr:
                 _wr.render("Warmup.", GenConfig(max_secs=2, temperature=0.7))
 
-        _save_last_ckpt(ckpt_path.strip())
         return f"Loaded: {ckpt_path}"
     except Exception as e:
         return f"Error: {e}"
