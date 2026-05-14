@@ -14,8 +14,8 @@ def multinomial(input: Tensor, num_samples: int, replacement=False, *, generator
 def sample_top_k(probs: Tensor, k: int) -> Tensor:
     top_k_value, _ = torch.topk(probs, k, dim=-1)
     min_value_top_k = top_k_value[..., [-1]]
-    probs *= (probs >= min_value_top_k).float()
-    probs.div_(probs.sum(dim=-1, keepdim=True))
+    probs = probs * (probs >= min_value_top_k).float()
+    probs = probs / probs.sum(dim=-1, keepdim=True)
     next_token = multinomial(probs, num_samples=1)
     return next_token
 

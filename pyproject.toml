@@ -4,41 +4,69 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vui"
-description = "Vui: 100M parameter lightweight conversational text-to-speech model with breaths, laughter, and multi-speaker support"
-dynamic = ["version"]
+version = "1.0.0"
+description = "Vui: streaming conversational TTS server with WebRTC, ASR, and LLM integration"
 
-requires-python = "==3.12.3"
+requires-python = ">=3.12,<3.13"
 
 dependencies = [
-    "einops==0.8.1",
-    "inflect==7.5.0",
-    "gradio==5.33.0",
-    "numba==0.61.2",
-    "numpy>=1.24.0",
-    # "openai-whisper>=20231117",
-    "pydantic==2.11.5",
-    "soundfile==0.13.1",
-    "tiktoken==0.9.0",
-    "julius",
-    "torch>=2.10.0",
-    "torchcodec>=0.10.0",
-    "transformers==4.52.4",
+    # Model & inference
+    "torch>=2.5",
+    "torchaudio>=2.5",
+    "torchcodec>=0.5",
+    "transformers>=4.45",
+    "tokenizers>=0.20",
+    "safetensors>=0.4",
+    "huggingface_hub>=0.26",
+    "einops>=0.8",
+    "pydantic>=2.9",
+    "numpy>=1.24",
+    "soundfile>=0.12",
+    "openai-whisper",
+    "julius>=0.2",
+
+    # Streaming server
+    "aiohttp>=3.10",
+    "aiortc>=1.9",
+    "av>=12",            # WebRTC AudioFrame / AudioResampler — aiortc's wire type
+    "filelock>=3.16",
+    "httpx>=0.27",
+
+    # ASR (faster-whisper default; silero VAD ONNX bundled in serving/stream/)
+    "faster-whisper>=1.0",
+    "onnxruntime>=1.19",
+
+    # Demo UI
+    "gradio>=5.0",
+    "tiktoken>=0.8",
+
+    # Claude task delegation server (always installed — `claude_server.py`
+    # imports it at module load).
+    "claude-agent-sdk>=0.1.70",
+
+    # CUDA flash-attn — Linux only. Pre-built wheel via [tool.uv.sources].
+    # Install with `uv` (not pip — pip ignores [tool.uv.sources] and tries to source-build).
+    "flash-attn ; sys_platform == 'linux'",
 ]
 
-[tool.uv]
-override-dependencies = [
-    "torch>=2.10",
+[project.optional-dependencies]
+mlx = [
+    "mlx>=0.18",
+    "mlx-whisper>=0.4",
 ]
-
-[[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
-explicit = true
-ignore-error-codes = [403]
+# CPU-streaming ASR backend (Moonshine). Optional — faster-whisper covers the
+# default GPU path. Pull this in if you want VUI_ASR=moonshine to work.
+moonshine = [
+    "moonshine-voice",
+]
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu130" }
-torchcodec = { index = "pytorch-cu130" }
+# Pre-built wheel from a community mirror — avoids the (slow + fragile) source
+# build of flash-attn. Pinned to cu130 + torch 2.10 + cp312.
+flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.12/flash_attn-2.7.4%2Bcu130torch2.10-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"vui.serving.stream" = ["index.html", "silero_vad.onnx"]

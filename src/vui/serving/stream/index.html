@@ -1,0 +1,1387 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vui Stream</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; background: #0a0a0a; color: #e0e0e0; padding: 20px; max-width: 600px; margin: 0 auto; }
+h1 { font-size: 1.3em; margin-bottom: 16px; color: #fff; }
+.section { margin-bottom: 16px; padding: 12px; background: #1a1a1a; border-radius: 8px; border: 1px solid #333; }
+label { display: block; font-size: 0.85em; color: #999; margin-bottom: 4px; }
+input[type=file] { display: none; }
+.upload-btn, .talk-btn, .reset-btn {
+    display: inline-block; padding: 10px 20px; border-radius: 6px;
+    border: none; cursor: pointer; font-size: 0.95em; font-weight: 600;
+    transition: background 0.15s;
+}
+.upload-btn { background: #2563eb; color: #fff; }
+.upload-btn:hover { background: #1d4ed8; }
+.talk-btn {
+    width: 100%; padding: 16px; font-size: 1.1em;
+    background: #333; color: #fff; user-select: none; -webkit-user-select: none;
+    touch-action: none;
+}
+.talk-btn.recording { background: #dc2626; }
+.talk-btn:active { background: #dc2626; }
+.reset-btn { background: #555; color: #fff; font-size: 0.8em; padding: 6px 12px; }
+.reset-btn:hover { background: #666; }
+#status { font-size: 0.85em; color: #999; margin-top: 8px; min-height: 1.2em; }
+#conversation { font-size: 0.9em; max-height: 400px; overflow-y: auto; }
+.msg { padding: 6px 10px; margin: 4px 0; border-radius: 6px; }
+.msg.user { background: #1e3a5f; color: #a8d0f0; }
+.msg.assistant { background: #1a2e1a; color: #a8e0a8; }
+.msg .role { font-size: 0.75em; color: #888; text-transform: uppercase; }
+#chunks { font-size: 0.8em; color: #888; margin-top: 8px; white-space: pre-wrap; }
+.level-bar { height: 4px; background: #333; border-radius: 2px; margin-top: 8px; overflow: hidden; }
+.level-bar-fill { height: 100%; background: #22c55e; width: 0%; transition: width 0.05s; }
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.setting { display: flex; flex-direction: column; }
+.setting input[type=range] { width: 100%; }
+.setting input[type=number] { width: 60px; background: #111; color: #e0e0e0; border: 1px solid #444; border-radius: 4px; padding: 2px 4px; font-size: 0.8em; text-align: right; }
+#prompt-info { font-size: 0.85em; color: #22c55e; margin-top: 6px; }
+.prompt-row { display: flex; gap: 6px; margin-top: 6px; align-items: center; }
+.prompt-row select, .prompt-row input[type=text] { flex: 1; background: #111; color: #e0e0e0; border: 1px solid #444; border-radius: 4px; padding: 6px 8px; font-size: 0.85em; }
+.save-btn, .load-btn { padding: 6px 12px; border: none; border-radius: 4px; cursor: pointer; font-size: 0.8em; font-weight: 600; }
+.cancel-btn { padding: 10px 20px; border: none; border-radius: 8px; background: #dc2626; color: #fff; font-size: 1em; font-weight: 600; cursor: pointer; margin-top: 6px; }
+.cancel-btn:hover { background: #b91c1c; }
+.save-btn { background: #16a34a; color: #fff; }
+.save-btn:hover { background: #15803d; }
+.load-btn { background: #2563eb; color: #fff; }
+.load-btn:hover { background: #1d4ed8; }
+#soul { width: 100%; min-height: 60px; background: #111; color: #e0e0e0; border: 1px solid #444; border-radius: 4px; padding: 8px; font-size: 0.85em; font-family: inherit; resize: vertical; margin-top: 4px; }
+#worker-pills { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; font-size: 0.75em; }
+.pill { display: inline-block; padding: 2px 6px; border-radius: 3px; background: #2a2a2a; color: #888; }
+.pill.up { color: #4ade80; background: #052e16; }
+.pill.down { color: #f87171; background: #2e0505; }
+.pill.warn { color: #fbbf24; background: #2e1f05; }
+#log { max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 0.75em; line-height: 1.5; }
+#log:empty { display: none; }
+.log-entry { padding: 1px 0; border-bottom: 1px solid #1a1a1a; }
+.log-entry.info { color: #888; }
+.log-entry.timing { color: #60a5fa; }
+.log-entry.warn { color: #fbbf24; }
+.log-entry.error { color: #f87171; }
+.log-entry .ts { color: #555; margin-right: 6px; }
+.memory-item { padding: 4px 0; border-bottom: 1px solid #222; display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.memory-item .memory-text { flex: 1; min-width: 0; word-break: break-word; }
+.memory-delete { color: #888; cursor: pointer; padding: 2px 6px; border-radius: 3px; font-size: 1em; line-height: 1; user-select: none; flex-shrink: 0; }
+.memory-delete:hover { color: #f87171; background: #2e0505; }
+.section-clear { font-size: 0.75em; color: #666; cursor: pointer; user-select: none; margin-left: 8px; }
+.section-clear:hover { color: #f87171; }
+.section-header { display: flex; align-items: center; }
+.task-item { padding: 8px; margin: 4px 0; border-radius: 6px; background: #111; border: 1px solid #333; font-size: 0.85em; cursor: pointer; }
+.task-item .task-header { display: flex; justify-content: space-between; align-items: center; }
+.task-item .task-desc { color: #ccc; }
+.task-item .task-status { font-size: 0.75em; font-weight: 600; padding: 2px 8px; border-radius: 4px; }
+.task-status.running { background: #1e3a5f; color: #60a5fa; }
+.task-status.done { background: #1a2e1a; color: #4ade80; }
+.task-status.cancelled { background: #3a1a1a; color: #f87171; }
+.task-status.error { background: #3a1a1a; color: #f87171; }
+.task-item .task-time { font-size: 0.75em; color: #666; margin-top: 4px; }
+.task-item .task-result { display: none; margin-top: 8px; padding: 8px; background: #0a0a0a; border-radius: 4px; font-size: 0.85em; color: #aaa; white-space: pre-wrap; max-height: 200px; overflow-y: auto; }
+.task-item.expanded .task-result { display: block; }
+.task-item .task-expand { font-size: 0.7em; color: #666; float: right; }
+.task-item .task-actions { display: flex; gap: 6px; align-items: center; }
+.task-delete { color: #888; cursor: pointer; padding: 4px 10px; border-radius: 3px; font-size: 1.2em; line-height: 1; user-select: none; }
+.task-delete:hover { color: #f87171; background: #2e0505; }
+#voice-orb-host { position: relative; width: 100%; height: 220px; margin-bottom: 12px; }
+#voice-orb { position: absolute; inset: 0; }
+#voice-orb.pinned {
+    position: fixed;
+    top: auto; left: auto;
+    bottom: 16px; right: 16px;
+    width: 140px; height: 140px;
+    z-index: 100;
+    cursor: pointer;
+    border-radius: 50%;
+    background: rgba(10,10,10,0.55);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+    overflow: hidden;
+}
+#voice-orb.fullscreen {
+    position: fixed;
+    inset: 0;
+    top: 0; left: 0;
+    width: 100vw; height: 100vh;
+    z-index: 1000;
+    background: #0a0a0a;
+    border-radius: 0;
+    box-shadow: none;
+    cursor: default;
+}
+.viz-btn {
+    position: absolute;
+    top: 6px; right: 6px;
+    z-index: 11;
+    background: rgba(40,40,40,0.55);
+    color: #e0e0e0;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 3px 7px;
+    cursor: pointer;
+    font-size: 0.85em;
+    line-height: 1;
+    opacity: 0.5;
+    transition: opacity 0.15s;
+}
+#voice-orb-host:hover .viz-btn { opacity: 1; }
+#voice-orb.pinned + .viz-btn { display: none; }
+#viz-exit-btn {
+    display: none;
+    position: fixed;
+    top: 16px; right: 16px;
+    z-index: 1001;
+    background: rgba(40,40,40,0.7);
+    color: #e0e0e0;
+    border: 1px solid #555;
+    border-radius: 6px;
+    padding: 8px 14px;
+    cursor: pointer;
+    font-size: 0.95em;
+}
+body.viz-only > *:not(#viz-exit-btn):not(#voice-orb-host):not(script) { display: none !important; }
+body.viz-only { padding: 0; max-width: none; }
+body.viz-only #voice-orb-host { height: 0; margin: 0; }
+body.viz-only #viz-exit-btn { display: block; }
+
+/* Mobile — phones (and tight desktop windows). Trim the visualiser, drop
+   body padding, tighten section spacing so the talk button is reachable
+   without scrolling. */
+@media (max-width: 600px) {
+    body { padding: 10px; }
+    h1 { font-size: 1.1em; margin-bottom: 10px; }
+    .section { padding: 8px; margin-bottom: 10px; }
+    #voice-orb-host { height: 120px; margin-bottom: 8px; }
+    #voice-orb.pinned { width: 96px; height: 96px; bottom: 10px; right: 10px; }
+    #worker-pills { font-size: 0.7em; }
+    #conversation { max-height: 240px; }
+    #log { max-height: 120px; }
+    .talk-btn { padding: 14px; font-size: 1em; }
+    .settings-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 600px) and (orientation: landscape) {
+    #voice-orb-host { height: 80px; }
+}
+/* Touch devices: viz pin/fullscreen buttons can't rely on hover. */
+@media (hover: none) {
+    .viz-btn { opacity: 1; }
+}
+</style>
+</head>
+<body>
+<h1>Vui Stream</h1>
+
+<div id="voice-orb-host">
+    <div id="voice-orb"></div>
+    <button class="viz-btn" id="viz-fullscreen-btn" title="Visualisation only (Esc to exit)">&#x26f6;</button>
+</div>
+<button id="viz-exit-btn" title="Exit (Esc)">Exit viz</button>
+
+<div id="worker-pills">
+    <span class="pill" id="pill-tts" title="TTS worker">tts</span>
+    <span class="pill" id="pill-asr" title="ASR worker">asr</span>
+    <span class="pill" id="pill-mic" title="Mic / VAD audio pipeline">mic</span>
+    <span class="pill" id="pill-warmup" title="LLM prefill / prompt load / startup">warmup</span>
+    <span class="pill down" id="pill-llm" title="LLM backend (Ollama / vLLM)">llm</span>
+    <span class="pill down" id="pill-task-server" title="Claude task server (ask_claude tool)">task server</span>
+</div>
+<div id="single-tenant-notice" style="font-size:0.75em;color:#fbbf24;margin-bottom:8px;padding:6px 8px;background:#1f1a0a;border:1px solid #3a2f12;border-radius:4px;">
+    Single-user server &mdash; only one client at a time. Opening another tab or device will take over this session.
+</div>
+
+<div class="section">
+    <label>Voice Prompt</label>
+    <div class="prompt-row">
+        <select id="saved-prompts" title="Pick a saved voice prompt to load. The selected speaker becomes the assistant's voice."><option value="">-- Saved Prompts --</option></select>
+        <button class="load-btn" onclick="loadSavedPrompt()" title="Load the selected voice prompt into the TTS context">Load</button>
+    </div>
+    <div class="prompt-row">
+        <input type="file" id="prompt-file" accept="audio/*" style="display:none">
+        <button class="upload-btn" onclick="document.getElementById('prompt-file').click()" title="Upload a new voice-prompt audio file (wav/mp3/flac) to clone its speaker">Upload New</button>
+        <input type="text" id="prompt-name" placeholder="Name to save as..." title="Filename to save the current prompt under (used by the Save button)">
+        <button class="save-btn" onclick="savePrompt()" title="Save the current prompt under the name above so you can reload it later">Save</button>
+        <button class="reset-btn" onclick="resetSession()" title="Clear conversation history and rewind TTS to the prompt (memories are kept)">Reset</button>
+    </div>
+    <div id="prompt-info"></div>
+    <div class="prompt-row" style="margin-top:6px;">
+        <textarea id="prompt-text" placeholder="Prompt transcript (edit & re-align)" style="flex:1;min-height:60px;background:#111;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:8px;font-size:0.85em;font-family:inherit;resize:vertical;"></textarea>
+        <button class="load-btn" id="realign-btn" onclick="updatePromptText()" title="Re-run forced alignment on the prompt audio using the edited transcript above">Re-align</button>
+    </div>
+    <audio id="prompt-player" controls style="display:none;margin-top:6px;width:100%;height:32px;"></audio>
+</div>
+
+<div class="section">
+    <div style="display:flex;gap:6px;align-items:center;">
+        <button class="talk-btn" id="talk-btn" style="flex:1;" disabled title="Press and hold (or hold space) to keep the floor — VAD won't endpoint while held, so a thinking pause won't cut off your turn">Connecting...</button>
+        <button class="reset-btn" id="vad-btn" onclick="toggleVAD()" style="padding:16px 12px;font-size:1.1em;min-width:44px;background:#16a34a;" title="Toggle voice activity detection. When off, the mic stops listening entirely">VAD</button>
+        <button class="reset-btn" id="listen-btn" onclick="toggleListen()" style="padding:16px 12px;font-size:1.1em;min-width:44px;background:#555;" title="Listen mode — assistant keeps listening but only responds when you address it by name (e.g. 'Vui, what time is it'). Toggle off to chat normally.">&#x1f92b;</button>
+    </div>
+    <div style="display:flex;gap:6px;margin-top:8px;">
+        <input type="text" id="tts-input" placeholder="Type text to speak..." title="Direct TTS — type text and the assistant speaks it verbatim. Bypasses the LLM, doesn't appear in conversation history." style="flex:1;background:#111;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:8px;font-size:0.9em;">
+        <button class="upload-btn" onclick="sendTTS()" style="padding:8px 16px;" title="Synthesise the text on the left and speak it through TTS (no LLM, no ASR)">Speak</button>
+    </div>
+    <button class="cancel-btn" id="cancel-btn" onclick="cancelGeneration()" style="display:none" title="Cancel the assistant's in-flight response (stops TTS playback and LLM streaming)">Cancel</button>
+    <div class="level-bar"><div class="level-bar-fill" id="level-fill"></div></div>
+    <div style="display:flex;flex-direction:column;gap:2px;margin-top:4px;">
+        <div style="display:flex;align-items:center;gap:6px;">
+            <span style="font-size:0.65em;color:#666;width:52px;text-align:right;">TTS</span>
+            <div class="level-bar" style="height:4px;flex:1;"><div class="level-bar-fill" id="context-fill" style="background:#f59e0b;width:0%"></div></div>
+            <span id="context-label" style="font-size:0.65em;color:#888;white-space:nowrap;min-width:50px;text-align:right;"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+            <span style="font-size:0.65em;color:#666;width:52px;text-align:right;">Conv</span>
+            <div class="level-bar" style="height:4px;flex:1;"><div class="level-bar-fill" id="conv-ctx-fill" style="background:#f59e0b;width:0%"></div></div>
+            <span id="conv-ctx-label" style="font-size:0.65em;color:#888;white-space:nowrap;min-width:50px;text-align:right;"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+            <span style="font-size:0.65em;color:#666;width:52px;text-align:right;">Thoughts</span>
+            <div class="level-bar" style="height:4px;flex:1;"><div class="level-bar-fill" id="thoughts-ctx-fill" style="background:#f59e0b;width:0%"></div></div>
+            <span id="thoughts-ctx-label" style="font-size:0.65em;color:#888;white-space:nowrap;min-width:50px;text-align:right;"></span>
+        </div>
+    </div>
+    <div id="status">Connecting...</div>
+</div>
+
+<div class="section">
+    <label>Conversation</label>
+    <div id="conversation"></div>
+    <div id="chunks"></div>
+</div>
+
+<div class="section" id="tasks-section" style="display:none;">
+    <div class="section-header"><label>Tasks</label><span class="section-clear" onclick="clearAllTasks()">clear all</span></div>
+    <div id="tasks-list"></div>
+</div>
+
+<div class="section" id="memories-section" style="display:none;">
+    <div class="section-header"><label>Memories</label><span class="section-clear" onclick="clearAllMemories()">clear all</span></div>
+    <div id="memories-list" style="font-size:0.85em;color:#ccc;"></div>
+</div>
+
+<div class="section">
+    <label>Assistant Name</label>
+    <input type="text" id="assistant-name" placeholder="Vui" title="What the assistant is called. The model is told its name and recognises when you address it. Changing this re-prefills the LLM (takes a second)." style="width:100%;background:#111;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:6px 8px;font-size:0.9em;">
+</div>
+
+<div class="section">
+    <label>Soul</label>
+    <textarea id="soul" title="The assistant's persona prompt — what we call the &quot;soul&quot;. Edited live; saved to .soul on disk; re-prefilled into the LLM on change."></textarea>
+</div>
+
+<div class="section">
+    <label>ASR Model</label>
+    <div class="prompt-row">
+        <select id="asr-model" title="Speech-to-text backend. faster-whisper (GPU) is fastest + most accurate for English; Moonshine (CPU) frees the GPU."></select>
+        <button class="reset-btn" onclick="refreshAsrModels()" style="padding:6px 8px;" title="Refresh the list of available ASR models">&#x21bb;</button>
+    </div>
+</div>
+
+<div class="section">
+    <label>LLM Model</label>
+    <div class="prompt-row">
+        <select id="ollama-model" title="Local LLM (via Ollama) that drives the conversation. Switching live re-prefills the soul."></select>
+        <button class="reset-btn" onclick="refreshOllamaModels()" style="padding:6px 8px;" title="Refresh the list of installed Ollama models">&#x21bb;</button>
+        <input type="text" id="ollama-pull-name" placeholder="Pull new model..." title="Name of an Ollama model to download (e.g. qwen3.5:4b). Click Pull to fetch.">
+        <button class="load-btn" onclick="pullOllamaModel()" title="Download the model named on the left from Ollama's registry">Pull</button>
+    </div>
+    <div id="pull-progress" style="font-size:0.8em;color:#60a5fa;margin-top:6px;min-height:1.2em;"></div>
+</div>
+
+<div class="section">
+    <label>TTS Settings</label>
+    <div class="settings-grid">
+        <div class="setting" title="Sampling temperature for TTS. Higher = more varied / expressive speech; lower = more deterministic. Default 0.7.">
+            <label>Temperature <input type="number" id="temp-num" min="0.1" max="1.5" step="0.1" value="0.7"></label>
+            <input type="range" id="temperature" min="0.1" max="1.5" step="0.1" value="0.7">
+        </div>
+        <div class="setting" title="Restrict sampling to the top-K most likely codebook entries per frame. Lower = safer; higher = more variety.">
+            <label>Top-K <input type="number" id="topk-num" min="1" max="500" step="1" value="50"></label>
+            <input type="range" id="top_k" min="1" max="500" step="1" value="50">
+        </div>
+        <div class="setting" title="Repetition penalty applied to recently-emitted audio codes. Raise to break out of stuck loops; too high causes artefacts.">
+            <label>Rep Penalty <input type="number" id="rep-num" min="1.0" max="3.0" step="0.1" value="1.1"></label>
+            <input type="range" id="rep_penalty" min="1.0" max="3.0" step="0.1" value="1.1">
+        </div>
+        <div class="setting" title="How many recent frames the repetition penalty looks back over. 0 disables. Higher = more aggressive de-loop.">
+            <label>Rep Window <input type="number" id="rep-window-num" min="0" max="256" step="1" value="24"></label>
+            <input type="range" id="rep_window" min="0" max="256" step="1" value="24">
+        </div>
+        <div class="setting" title="Target words-per-second conditioning. 0 = let the model follow the prompt's pace; raise to push speech faster.">
+            <label>WPS <input type="number" id="wps-num" min="0" max="5" step="0.1" value="0"></label>
+            <input type="range" id="wps_score" min="0" max="5" step="0.1" value="0">
+        </div>
+        <div class="setting" title="Max words per TTS chunk. Smaller chunks = lower latency to first audio but more boundary artefacts.">
+            <label>Chunk Words <input type="number" id="chunk-words-num" min="5" max="120" step="1" value="60"></label>
+            <input type="range" id="chunk_words" min="5" max="120" step="1" value="60">
+        </div>
+        <div class="setting" title="Words in the FIRST chunk of a reply. Smaller = faster time-to-first-audio. 0 disables the special-case first chunk.">
+            <label>First Chunk Words <input type="number" id="first-chunk-words-num" min="0" max="20" step="1" value="8"></label>
+            <input type="range" id="first_chunk_words" min="0" max="20" step="1" value="8">
+        </div>
+        <div class="setting" title="RQ-Transformer codebook levels decoded per audio frame (max 16). Lower = faster + less VRAM; below 8 quality drops. 0 = use all 16.">
+            <label>Codebooks <input type="number" id="codebooks-num" min="0" max="16" step="1" value="16"></label>
+            <input type="range" id="n_codebooks" min="0" max="16" step="1" value="16">
+        </div>
+        <div class="setting" title="Sigmoid threshold for the end-of-utterance logit. Lower = ends turns more readily; higher = harder to stop. Default 0.2.">
+            <label>EOS Thresh <input type="number" id="eos-num" min="0.1" max="0.9" step="0.05" value="0.2"></label>
+            <input type="range" id="eos_threshold" min="0.1" max="0.9" step="0.05" value="0.2">
+        </div>
+        <div class="setting" style="display:flex;align-items:center;" title="Feed the user's encoded audio codes back into the TTS KV so the model conditions on what was just said (vs. ASR text only).">
+            <label><input type="checkbox" id="user_audio" checked> User audio codes</label>
+        </div>
+        <div class="setting" style="display:flex;align-items:center;" title="Keep multi-turn conversation history in the TTS KV across turns. Off = each turn starts from the prompt only.">
+            <label><input type="checkbox" id="keep_context"> Keep context</label>
+        </div>
+        <div class="setting" style="display:flex;align-items:center;" title="Run the parallel 'thoughts' LLM that decides whether to invoke memory ops or delegate to the Claude task server.">
+            <label><input type="checkbox" id="tool_check" checked> Tool check</label>
+        </div>
+    </div>
+    <label style="margin-top:8px;display:block;" title="Six conditioning channels (0-5) that bias the model toward audio with these quality characteristics. 0 = disable that channel.">Speech Quality</label>
+    <div class="settings-grid" style="margin-top:4px;">
+        <div class="setting" title="DNSMOS signal clarity. 5 = clean speech, 0 = muffled / corrupted.">
+            <label>DNS Signal <input type="number" id="sq-dns-sig-num" min="0" max="5" step="0.5" value="0"></label>
+            <input type="range" id="sq_dns_sig" min="0" max="5" step="0.5" value="0">
+        </div>
+        <div class="setting" title="DNSMOS background silence. 5 = clean room / no background noise.">
+            <label>DNS Background <input type="number" id="sq-dns-bak-num" min="0" max="5" step="0.5" value="0"></label>
+            <input type="range" id="sq_dns_bak" min="0" max="5" step="0.5" value="0">
+        </div>
+        <div class="setting" title="NISQA perceptual noise level. 5 = no audible noise.">
+            <label>NISQA Noise <input type="number" id="sq-nq-noi-num" min="0" max="5" step="0.5" value="0"></label>
+            <input type="range" id="sq_nq_noi" min="0" max="5" step="0.5" value="0">
+        </div>
+        <div class="setting" title="NISQA discontinuity / glitch score. 5 = smooth, no artefacts.">
+            <label>NISQA Disc. <input type="number" id="sq-nq-disc-num" min="0" max="5" step="0.5" value="0"></label>
+            <input type="range" id="sq_nq_disc" min="0" max="5" step="0.5" value="0">
+        </div>
+        <div class="setting" title="NISQA spectral colouration. 5 = neutral, natural timbre.">
+            <label>NISQA Color. <input type="number" id="sq-nq-col-num" min="0" max="5" step="0.5" value="0"></label>
+            <input type="range" id="sq_nq_col" min="0" max="5" step="0.5" value="0">
+        </div>
+        <div class="setting" title="NISQA loudness target. Higher pushes toward fuller / louder speech.">
+            <label>NISQA Loudness <input type="number" id="sq-nq-loud-num" min="0" max="5" step="0.5" value="5"></label>
+            <input type="range" id="sq_nq_loud" min="0" max="5" step="0.5" value="5">
+        </div>
+    </div>
+</div>
+
+<div class="section">
+    <label>Log</label>
+    <div id="log"></div>
+</div>
+
+<script src="/visualizer.js"></script>
+<script>
+const orbEl = document.getElementById('voice-orb');
+const orbHost = document.getElementById('voice-orb-host');
+const voiceViz = new VuiVoiceVisualizer({ container: orbEl });
+
+function setVizOnly(on) {
+    document.body.classList.toggle('viz-only', on);
+    if (on) {
+        orbEl.classList.remove('pinned');
+        orbEl.classList.add('fullscreen');
+    } else {
+        orbEl.classList.remove('fullscreen');
+        const rect = orbHost.getBoundingClientRect();
+        if (rect.bottom < 0) orbEl.classList.add('pinned');
+    }
+}
+
+document.getElementById('viz-fullscreen-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    setVizOnly(true);
+});
+document.getElementById('viz-exit-btn').addEventListener('click', () => setVizOnly(false));
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && document.body.classList.contains('viz-only')) setVizOnly(false);
+});
+
+orbEl.addEventListener('click', () => {
+    if (orbEl.classList.contains('pinned')) setVizOnly(true);
+});
+
+const _orbObserver = new IntersectionObserver(([entry]) => {
+    if (document.body.classList.contains('viz-only')) return;
+    if (entry.isIntersecting) {
+        orbEl.classList.remove('pinned');
+    } else {
+        orbEl.classList.add('pinned');
+    }
+}, { threshold: 0 });
+_orbObserver.observe(orbHost);
+let pc = null;
+let ws = null;
+let isRecording = false;
+let workersReady = false;
+let micLive = false;
+let micState = 'down';
+let llmAvailable = true;
+let audioCtx = null;
+let analyser = null;
+let contextMax = 0;
+
+function _updateBar(fillId, labelId, used, max) {
+    if (max <= 0) return;
+    const pct = Math.min(100, used / max * 100);
+    const fill = document.getElementById(fillId);
+    fill.style.width = pct + '%';
+    fill.style.background = pct > 80 ? '#dc2626' : pct > 60 ? '#f59e0b' : '#22c55e';
+    document.getElementById(labelId).textContent = used + ' / ' + max + ' (' + pct.toFixed(0) + '%)';
+}
+function updateContextBar(T, maxT) {
+    if (maxT > 0) contextMax = maxT;
+    if (contextMax <= 0) return;
+    _updateBar('context-fill', 'context-label', T, contextMax);
+}
+function updateConvCtx(data) {
+    if (data.conv_ctx_max > 0) _updateBar('conv-ctx-fill', 'conv-ctx-label', data.conv_ctx || 0, data.conv_ctx_max);
+    if (data.thoughts_ctx_max > 0) _updateBar('thoughts-ctx-fill', 'thoughts-ctx-label', data.thoughts_ctx || 0, data.thoughts_ctx_max);
+}
+let micStream = null;
+let remoteStream = null;
+
+let promptLoading = false;
+
+function setPill(id, state, label) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.remove('up', 'down', 'warn');
+    if (state) el.classList.add(state);
+    if (label !== undefined) el.textContent = label;
+}
+
+function disableUI() {
+    workersReady = false;
+    micLive = false;
+    document.querySelectorAll('button, input, select, textarea').forEach(el => { el.disabled = true; el.style.opacity = '0.4'; });
+    const tb = document.getElementById('talk-btn');
+    if (tb) tb.textContent = 'Connecting...';
+    setStatus('Connecting...');
+}
+
+function readyStatusText() {
+    if (!llmAvailable) return 'LLM offline';
+    if (micState !== 'ready') return 'Mic connecting...';
+    return vadEnabled ? 'Listening...' : 'VAD off';
+}
+
+function maybeEnableUI() {
+    if (workersReady && !promptLoading) {
+        document.querySelectorAll('button, input, select, textarea').forEach(el => { el.disabled = false; el.style.opacity = '1'; });
+        const tb = document.getElementById('talk-btn');
+        if (tb && !tb.classList.contains('recording')) {
+            tb.textContent = vadEnabled ? 'Listening' : 'VAD off';
+        }
+        setStatus(readyStatusText());
+    }
+}
+
+function setBusy(msg) {
+    promptLoading = true;
+    document.querySelectorAll('button, input, select, textarea').forEach(el => { el.disabled = true; el.style.opacity = '0.4'; });
+    setStatus(msg || 'Busy...');
+}
+
+function clearBusy() {
+    promptLoading = false;
+    maybeEnableUI();
+}
+
+function applySettings(s) {
+    const map = {temperature: 'temp', top_k: 'topk', rep_penalty: 'rep', rep_window: 'rep-window', wps_score: 'wps', chunk_words: 'chunk-words', first_chunk_words: 'first-chunk-words', n_codebooks: 'codebooks', eos_threshold: 'eos'};
+    for (const [key, prefix] of Object.entries(map)) {
+        if (key in s) {
+            const range = document.getElementById(key);
+            const num = document.getElementById(prefix + '-num');
+            if (range) range.value = s[key];
+            if (num) num.value = s[key];
+        }
+    }
+    const sqKeys = ['sq_dns_sig', 'sq_dns_bak', 'sq_nq_noi', 'sq_nq_disc', 'sq_nq_col', 'sq_nq_loud'];
+    if (s.sq_scores && Array.isArray(s.sq_scores)) {
+        sqKeys.forEach((k, i) => {
+            const range = document.getElementById(k);
+            const num = document.getElementById(k + '-num');
+            if (range && i < s.sq_scores.length) range.value = s.sq_scores[i];
+            if (num && i < s.sq_scores.length) num.value = s.sq_scores[i];
+        });
+    }
+    for (const cb of ['user_audio', 'keep_context', 'tool_check']) {
+        if (cb in s) {
+            const el = document.getElementById(cb);
+            if (el) el.checked = !!s[cb];
+        }
+    }
+    if (s.soul !== undefined) {
+        const sp = document.getElementById('soul');
+        if (sp) sp.value = s.soul;
+    }
+}
+
+function onWsMessage(e) {
+    const data = JSON.parse(e.data);
+    if (data.type === 'reply' || data.type === 'transcription' || data.type === 'context_cleared') {
+        console.log('[ws]', data.type, data.type === 'reply' ? data.text?.slice(0, 40) : data.text || '');
+    }
+    if (data.type === 'transcription') {
+        addMessage('user', data.text);
+        document.getElementById('chunks').textContent = '';
+        setStatus('Thinking...');
+        document.getElementById('cancel-btn').style.display = '';
+    } else if (data.type === 'rollback_user') {
+        // Server rolled the just-committed user turn back (user kept
+        // talking after we eagerly committed). Remove the last user
+        // message + any in-progress assistant message + their associated
+        // recorded-audio blob so the merged commit replaces them cleanly.
+        const conv = document.getElementById('conversation');
+        let last = conv.lastElementChild;
+        while (last && last.classList.contains('assistant')) {
+            conv.removeChild(last);
+            last = conv.lastElementChild;
+        }
+        if (last && last.classList.contains('user')) {
+            conv.removeChild(last);
+        }
+    } else if (data.type === 'reply') {
+        fadeInPlayback();
+        if (window._vadStopTime && !window._gotFirstReply) {
+            window._gotFirstReply = true;
+            const ttfr = (performance.now() - window._vadStopTime).toFixed(0);
+            addLog('TTFR (first reply): ' + ttfr + 'ms', 'timing');
+        }
+        const conv = document.getElementById('conversation');
+        let last = conv.lastElementChild;
+        if (last && last.classList.contains('assistant')) {
+            const sep = data.text && '.,!?;:)]}\'"'.indexOf(data.text[0]) === -1 ? ' ' : '';
+            last.innerHTML += sep + data.text;
+        } else {
+            addMessage('assistant', data.text);
+        }
+        setStatus('Generating TTS...');
+    } else if (data.type === 'status') {
+        setStatus(data.text);
+    } else if (data.type === 'generating') {
+        if (window._vadStopTime && !window._gotFirstChunk) {
+            window._gotFirstChunk = true;
+            const ttfa = (performance.now() - window._vadStopTime).toFixed(0);
+            addLog('TTFA (first audio): ' + ttfa + 'ms', 'timing');
+        }
+        const el = document.getElementById('chunks');
+        el.textContent += 'Chunk ' + data.chunk + ': ' + data.text + ' (' + data.secs + 's)\n';
+    } else if (data.type === 'vad_start') {
+        talkBtn.classList.add('recording');
+        talkBtn.textContent = 'Speaking...';
+        fadeOutPlayback();
+    } else if (data.type === 'vad_stop') {
+        talkBtn.classList.remove('recording');
+        talkBtn.textContent = vadEnabled ? 'Listening' : 'VAD off';
+        setStatus('Processing...');
+        window._vadStopTime = performance.now();
+        window._gotFirstReply = false;
+        window._gotFirstChunk = false;
+    } else if (data.type === 'partial_asr' || data.type === 'committed_asr') {
+        // Don't render partials as bubbles — eager commits + rollback can
+        // leave stale text. Only `transcription` produces a final bubble.
+    } else if (data.type === 'turn_done') {
+        document.getElementById('cancel-btn').style.display = 'none';
+        updateContextBar(data.T, data.max_T);
+        updateConvCtx(data);
+        setStatus(workersReady ? readyStatusText() : 'Done. ' + data.total_secs + 's audio | T=' + data.T + '/' + data.max_T);
+    } else if (data.type === 'prompt_loaded') {
+        document.getElementById('prompt-info').textContent = 'T=' + data.T + ' | ' + (data.text || '(no text)');
+        if (data.text) document.getElementById('prompt-text').value = data.text;
+        updateContextBar(data.T, data.max_T);
+        setStatus('Ready. T=' + data.T + '/' + data.max_T);
+        loadPromptAudio();
+    } else if (data.type === 'workers_ready') {
+        workersReady = true;
+        setPill('pill-warmup', 'up', 'warmup');
+        maybeEnableUI();
+    } else if (data.type === 'mic_live') {
+        micLive = true;
+        setPill('pill-mic', 'up', 'mic');
+        if (!workersReady) setStatus('Mic ready, warming up backend...');
+    } else if (data.type === 'busy') {
+        workersReady = false;
+        disableUI();
+        setPill('pill-warmup', 'warn', 'warmup: ' + (data.reason || 'busy'));
+    } else if (data.type === 'worker_status') {
+        const states = data.states || {};
+        const map = {tts: 'pill-tts', asr: 'pill-asr', mic: 'pill-mic', warmup: 'pill-warmup'};
+        for (const [key, id] of Object.entries(map)) {
+            if (key in states) {
+                const s = states[key];
+                const cls = s === 'ready' ? 'up' : (s === 'down' ? 'down' : 'warn');
+                setPill(id, cls, key);
+            }
+        }
+        if ('mic' in states) {
+            const prev = micState;
+            micState = states.mic;
+            if (workersReady && !promptLoading && prev !== micState) {
+                setStatus(readyStatusText());
+            }
+        }
+    } else if (data.type === 'task_server_status') {
+        setPill('pill-task-server', data.available ? 'up' : 'down', 'task server');
+    } else if (data.type === 'llm_status') {
+        llmAvailable = !!data.available;
+        setPill('pill-llm', llmAvailable ? 'up' : 'down', 'llm');
+        if (workersReady && !promptLoading) setStatus(readyStatusText());
+    } else if (data.type === 'pull_progress') {
+        document.getElementById('pull-progress').textContent = data.text;
+    } else if (data.type === 'settings' && data.settings) {
+        applySettings(data.settings);
+    } else if (data.type === 'task_update') {
+        updateTask(data);
+    } else if (data.type === 'task_removed') {
+        delete _tasks[data.task_id];
+        renderTasks();
+    } else if (data.type === 'tasks_cleared') {
+        Object.keys(_tasks).forEach(k => delete _tasks[k]);
+        renderTasks();
+    } else if (data.type === 'assistant_name') {
+        const el = document.getElementById('assistant-name');
+        if (el && document.activeElement !== el) el.value = data.name || '';
+    } else if (data.type === 'listen_mode') {
+        listenMode = !!data.enabled;
+        applyListenUI();
+    } else if (data.type === 'memories') {
+        updateMemories(data.memories || []);
+    } else if (data.type === 'context_cleared') {
+        console.log('[reset] context_cleared received, clearing conv (had', document.getElementById('conversation').children.length, 'msgs)');
+        document.getElementById('conversation').innerHTML = '';
+        document.getElementById('chunks').textContent = '';
+        updateConvCtx({conv_ctx: 0, conv_ctx_max: 8192, thoughts_ctx: 0, thoughts_ctx_max: 8192});
+    } else if (data.type === 'model_changed') {
+        refreshOllamaModels();
+    } else if (data.type === 'log') {
+        addLog(data.text, data.level || 'info');
+    }
+}
+
+async function connectWebRTC() {
+    if (pc) { pc.close(); pc = null; }
+
+    pc = new RTCPeerConnection({iceServers: []});
+    micStream.getAudioTracks().forEach(t => pc.addTrack(t, micStream));
+
+    if (!remoteAudioEl) {
+        remoteAudioEl = document.createElement('audio');
+        remoteAudioEl.autoplay = true;
+        document.body.appendChild(remoteAudioEl);
+    }
+    pc.ontrack = (e) => {
+        remoteStream = e.streams[0];
+        remoteAudioEl.srcObject = remoteStream;
+        remoteAudioEl.play().catch(err => console.warn('Autoplay blocked:', err));
+        voiceViz.attachAssistantStream(remoteStream);
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    const resp = await fetch('/offer', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({sdp: pc.localDescription.sdp, type: pc.localDescription.type}),
+    });
+    const answer = await resp.json();
+    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+}
+
+let reconnectTimer = null;
+let sessionTaken = false;
+
+function showSessionTakenBanner() {
+    let el = document.getElementById('session-taken-banner');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'session-taken-banner';
+        el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2000;padding:14px;background:#3a1a1a;color:#fca5a5;border-bottom:1px solid #7f1d1d;font-size:0.95em;text-align:center;';
+        el.innerHTML = '<strong>Session taken over</strong> by another tab or device. ' +
+            '<button id="reclaim-btn" title="Take the session back from whichever tab or device has it now" style="margin-left:12px;padding:6px 14px;background:#dc2626;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:600;">Reclaim</button>';
+        document.body.prepend(el);
+        document.getElementById('reclaim-btn').onclick = () => {
+            sessionTaken = false;
+            el.remove();
+            connectWS();
+        };
+    }
+}
+
+// Per-tab client ID — sessionStorage is unique per tab and survives
+// refresh/reconnect within that tab. Server uses it to tell reconnects
+// (same cid → just rebind) apart from real new clients (different cid →
+// kick the existing session).
+let clientId = sessionStorage.getItem('vui_cid');
+if (!clientId) {
+    clientId = (self.crypto && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : (Date.now().toString(36) + Math.random().toString(36).slice(2));
+    sessionStorage.setItem('vui_cid', clientId);
+}
+
+function connectWS() {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    disableUI();
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(proto + '://' + location.host + '/ws?cid=' + encodeURIComponent(clientId));
+    voiceViz.attachWebSocket(ws);
+    ws.onopen = async () => {
+        connectWebRTC().catch(e => setStatus('WebRTC setup failed: ' + e.message));
+        ws.send(JSON.stringify({type: 'vad_mode', enabled: vadEnabled}));
+        if (!workersReady) {
+            setStatus('Connected. Waiting for workers...');
+        }
+        refreshPromptList();
+    };
+    ws.onmessage = (e) => {
+        try {
+            const data = JSON.parse(e.data);
+            if (data.type === 'session_taken') {
+                sessionTaken = true;
+                if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+                setStatus('Session taken over');
+                showSessionTakenBanner();
+                return;
+            }
+        } catch (_) {}
+        onWsMessage(e);
+    };
+    ws.onerror = () => setStatus('WebSocket error');
+    ws.onclose = () => {
+        if (sessionTaken) {
+            disableUI();
+            return;
+        }
+        setStatus('Disconnected. Reconnecting...');
+        disableUI();
+        reconnectTimer = setTimeout(connectWS, 2000);
+    };
+}
+
+async function init() {
+    try {
+        micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+                sampleRate: 48000,
+            }
+        });
+    } catch(e) {
+        setStatus('Mic access denied: ' + e.message);
+        return;
+    }
+
+    audioCtx = new AudioContext();
+    const source = audioCtx.createMediaStreamSource(micStream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    source.connect(analyser);
+    voiceViz.attachMicStream(micStream);
+    updateLevel();
+
+    connectWS();
+}
+
+let vadEnabled = true;
+
+let listenMode = false;
+function toggleListen() {
+    listenMode = !listenMode;
+    if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({type: 'listen_mode', enabled: listenMode}));
+    }
+    applyListenUI();
+}
+function applyListenUI() {
+    const btn = document.getElementById('listen-btn');
+    if (btn) btn.style.background = listenMode ? '#dc2626' : '#555';
+}
+
+function toggleVAD() {
+    vadEnabled = !vadEnabled;
+    if (!vadEnabled && floorHeld) setFloorHold(false);
+    const btn = document.getElementById('vad-btn');
+    btn.style.background = vadEnabled ? '#16a34a' : '#555';
+    const tb = document.getElementById('talk-btn');
+    if (tb && !tb.classList.contains('recording')) {
+        tb.textContent = vadEnabled ? 'Listening' : 'VAD off';
+    }
+    setStatus(workersReady ? readyStatusText() : 'Connecting...');
+    if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({type: 'vad_mode', enabled: vadEnabled}));
+    }
+}
+
+function updateLevel() {
+    if (!analyser) return;
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteFrequencyData(data);
+    const avg = data.reduce((a, b) => a + b) / data.length;
+    const pct = Math.min(100, avg / 128 * 100);
+    document.getElementById('level-fill').style.width = pct + '%';
+    document.getElementById('level-fill').style.background = isRecording ? '#dc2626' : '#22c55e';
+    requestAnimationFrame(updateLevel);
+}
+
+const talkBtn = document.getElementById('talk-btn');
+
+// "Hold the floor" — press-and-hold the talk button (mouse / touch / pen) or
+// spacebar to keep VAD from auto-committing a thinking pause. Release →
+// normal endpointing resumes.
+let floorHeld = false;
+function setFloorHold(hold) {
+    if (hold === floorHeld) return;
+    floorHeld = hold;
+    if (hold) {
+        talkBtn.classList.add('recording');
+        talkBtn.textContent = 'Holding...';
+    } else {
+        talkBtn.classList.remove('recording');
+        talkBtn.textContent = vadEnabled ? 'Listening' : 'VAD off';
+    }
+    if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({type: 'floor_hold', hold: hold}));
+    }
+}
+// Pointer Events cover mouse + touch + pen with one path.
+talkBtn.addEventListener('pointerdown', (e) => {
+    if (!vadEnabled || !workersReady) return;
+    e.preventDefault();
+    try { talkBtn.setPointerCapture(e.pointerId); } catch (_) {}
+    setFloorHold(true);
+});
+talkBtn.addEventListener('pointerup', () => setFloorHold(false));
+talkBtn.addEventListener('pointercancel', () => setFloorHold(false));
+talkBtn.addEventListener('pointerleave', () => setFloorHold(false));
+// Spacebar = floor hold (ignore when typing).
+// preventDefault unconditionally outside inputs so space never scrolls the
+// page — even when VAD is off or workers aren't ready yet.
+document.addEventListener('keydown', (e) => {
+    if (e.code !== 'Space') return;
+    if (['INPUT','TEXTAREA'].includes(document.activeElement.tagName)) return;
+    e.preventDefault();
+    if (e.repeat) return;
+    if (!vadEnabled || !workersReady) return;
+    setFloorHold(true);
+});
+document.addEventListener('keyup', (e) => {
+    if (e.code !== 'Space') return;
+    if (['INPUT','TEXTAREA'].includes(document.activeElement.tagName)) return;
+    e.preventDefault();
+    if (floorHeld) setFloorHold(false);
+});
+// Safety net: release the floor if the page loses focus.
+window.addEventListener('blur', () => setFloorHold(false));
+
+function sendTTS() {
+    const input = document.getElementById('tts-input');
+    const text = input.value.trim();
+    if (!text) return;
+    if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({type: 'tts', text: text}));
+        addMessage('assistant', text);
+        document.getElementById('chunks').textContent = '';
+        document.getElementById('cancel-btn').style.display = '';
+        setStatus('Generating TTS...');
+        input.value = '';
+    }
+}
+document.getElementById('tts-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); sendTTS(); }
+});
+
+async function updatePromptText() {
+    const input = document.getElementById('prompt-text');
+    const text = input.value.trim();
+    if (!text) return;
+    setBusy('Re-aligning prompt...');
+    try {
+        const resp = await fetch('/update-prompt-text', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({text}),
+        });
+        const data = await resp.json();
+        if (data.ok) {
+            document.getElementById('prompt-info').textContent = 'T=' + data.T + ' | ' + data.text;
+            document.getElementById('conversation').innerHTML = '';
+            setStatus('Re-aligned. T=' + data.T);
+            loadPromptAudio(true);
+        } else {
+            setStatus('Re-align failed: ' + data.error);
+        }
+    } catch(e) { setStatus('Re-align error: ' + e.message); }
+    clearBusy();
+}
+document.getElementById('prompt-text').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); updatePromptText(); }
+});
+
+const settingsMap = {temperature: 'temp-num', top_k: 'topk-num', rep_penalty: 'rep-num', rep_window: 'rep-window-num', wps_score: 'wps-num', chunk_words: 'chunk-words-num', first_chunk_words: 'first-chunk-words-num', n_codebooks: 'codebooks-num', eos_threshold: 'eos-num', sq_dns_sig: 'sq-dns-sig-num', sq_dns_bak: 'sq-dns-bak-num', sq_nq_noi: 'sq-nq-noi-num', sq_nq_disc: 'sq-nq-disc-num', sq_nq_col: 'sq-nq-col-num', sq_nq_loud: 'sq-nq-loud-num'};
+const sqKeys = ['sq_dns_sig', 'sq_dns_bak', 'sq_nq_noi', 'sq_nq_disc', 'sq_nq_col', 'sq_nq_loud'];
+function sendSqScores() {
+    if (ws && ws.readyState === 1) {
+        const scores = sqKeys.map(k => parseFloat(document.getElementById(k).value));
+        ws.send(JSON.stringify({type: 'settings', sq_scores: scores}));
+    }
+}
+Object.entries(settingsMap).forEach(([id, numId]) => {
+    const range = document.getElementById(id);
+    const num = document.getElementById(numId);
+    const isSq = sqKeys.includes(id);
+    function send(val) {
+        if (isSq) { sendSqScores(); return; }
+        if (ws && ws.readyState === 1) {
+            const msg = {type: 'settings'};
+            msg[id] = parseFloat(val);
+            ws.send(JSON.stringify(msg));
+        }
+    }
+    range.addEventListener('input', () => { num.value = range.value; send(range.value); });
+    num.addEventListener('change', () => { range.value = num.value; send(num.value); });
+});
+
+document.getElementById('user_audio').addEventListener('change', (e) => {
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({type: 'settings', user_audio: e.target.checked}));
+});
+document.getElementById('keep_context').addEventListener('change', (e) => {
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({type: 'settings', keep_context: e.target.checked}));
+});
+document.getElementById('tool_check').addEventListener('change', (e) => {
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({type: 'settings', tool_check: e.target.checked}));
+});
+
+const spEl = document.getElementById('soul');
+fetch('/state').then(r => r.json()).then(data => {
+    if (data.soul && !spEl.value) spEl.value = data.soul;
+}).catch(() => {});
+spEl.addEventListener('change', () => {
+    if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({type: 'settings', soul: spEl.value}));
+    }
+});
+
+// Assistant name — debounced so typing doesn't re-prefill the LLM on every keystroke.
+const nameEl = document.getElementById('assistant-name');
+let _nameTimer = null;
+nameEl.addEventListener('input', () => {
+    if (_nameTimer) clearTimeout(_nameTimer);
+    _nameTimer = setTimeout(() => {
+        if (ws && ws.readyState === 1) {
+            ws.send(JSON.stringify({type: 'settings', assistant_name: nameEl.value.trim() || 'Vui'}));
+        }
+    }, 600);
+});
+
+async function refreshAsrModels() {
+    try {
+        const resp = await fetch('/asr/models');
+        const data = await resp.json();
+        const sel = document.getElementById('asr-model');
+        sel.innerHTML = '';
+        const saved = localStorage.getItem('vui-asr-model');
+        const target = saved && data.models.includes(saved) ? saved : data.current;
+        data.models.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m;
+            opt.textContent = m;
+            if (m === target) opt.selected = true;
+            sel.appendChild(opt);
+        });
+        if (saved && saved !== data.current && data.models.includes(saved)) {
+            sel.dispatchEvent(new Event('change'));
+        }
+    } catch(e) {}
+}
+
+document.getElementById('asr-model').addEventListener('change', async () => {
+    const model = document.getElementById('asr-model').value;
+    if (!model) return;
+    localStorage.setItem('vui-asr-model', model);
+    setStatus('Switching ASR to ' + model + '...');
+    try {
+        const resp = await fetch('/asr/model', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({model}),
+        });
+        const data = await resp.json();
+        if (data.ok) { setStatus('ASR: ' + data.model); }
+        else { setStatus('ASR failed: ' + data.error); await refreshAsrModels(); }
+    } catch(e) { setStatus('ASR switch error: ' + e.message); }
+});
+
+refreshAsrModels();
+
+async function refreshOllamaModels() {
+    try {
+        const resp = await fetch('/ollama/models');
+        const data = await resp.json();
+        const sel = document.getElementById('ollama-model');
+        sel.innerHTML = '';
+        data.models.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m;
+            opt.textContent = m;
+            if (m === data.current) opt.selected = true;
+            sel.appendChild(opt);
+        });
+    } catch(e) {}
+}
+
+document.getElementById('ollama-model').addEventListener('change', async () => {
+    const model = document.getElementById('ollama-model').value;
+    if (!model) return;
+    setStatus('Switching model to ' + model + '...');
+    try {
+        const resp = await fetch('/ollama/model', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({model}),
+        });
+        const data = await resp.json();
+        if (data.ok) { setStatus('Model: ' + data.model); }
+        else { setStatus('Model failed: ' + data.error); await refreshOllamaModels(); }
+    } catch(e) { setStatus('Model switch error: ' + e.message); }
+});
+
+async function pullOllamaModel() {
+    const input = document.getElementById('ollama-pull-name');
+    const model = input.value.trim();
+    if (!model) return;
+    const prog = document.getElementById('pull-progress');
+    prog.textContent = 'Starting pull...';
+    try {
+        const resp = await fetch('/ollama/pull', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({model}),
+        });
+        const data = await resp.json();
+        if (data.ok) {
+            prog.textContent = 'Done!';
+            input.value = '';
+            await refreshOllamaModels();
+        } else {
+            prog.textContent = 'Failed: ' + data.error;
+        }
+    } catch(e) { prog.textContent = 'Error: ' + e.message; }
+}
+
+refreshOllamaModels();
+
+document.getElementById('prompt-file').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const nameField = document.getElementById('prompt-name');
+    if (!nameField.value.trim()) {
+        nameField.value = file.name.replace(/\.[^.]+$/, '');
+    }
+    setBusy('Uploading prompt (encoding ~1s/1s audio)...');
+    const form = new FormData();
+    form.append('file', file);
+    try {
+        const resp = await fetch('/upload-prompt', {method: 'POST', body: form});
+        const data = await resp.json();
+        if (data.ok) {
+            document.getElementById('prompt-info').textContent = 'T=' + data.T + ' | ' + (data.text || '(no text)');
+            if (data.text) document.getElementById('prompt-text').value = data.text;
+            document.getElementById('conversation').innerHTML = '';
+            document.getElementById('chunks').textContent = '';
+            setStatus('Ready. T=' + data.T);
+            refreshPromptList();
+            loadPromptAudio();
+        } else {
+            setStatus('Upload failed');
+        }
+    } catch(err) {
+        setStatus('Upload error: ' + err.message);
+    }
+    clearBusy();
+});
+
+async function loadPromptAudio(autoplay) {
+    const player = document.getElementById('prompt-player');
+    try {
+        const resp = await fetch('/prompt-audio');
+        if (!resp.ok) { player.style.display = 'none'; return; }
+        const shape = resp.headers.get('X-Codes-Shape') || '';
+        if (shape) {
+            const info = document.getElementById('prompt-info');
+            info.textContent += ' | codes=' + shape;
+        }
+        const blob = await resp.blob();
+        player.src = URL.createObjectURL(blob);
+        player.style.display = '';
+        if (autoplay) player.play();
+    } catch(e) { player.style.display = 'none'; }
+}
+
+async function resetSession() {
+    console.log('[reset] resetSession start, conv children=', document.getElementById('conversation').children.length);
+    setBusy('Resetting (re-prefilling prompt)...');
+    document.getElementById('cancel-btn').style.display = 'none';
+    try {
+        const resp = await fetch('/reset', {method: 'POST'});
+        console.log('[reset] /reset HTTP status=', resp.status, 'ok=', resp.ok);
+        setStatus('Session reset. Prompt preserved.');
+    } catch(e) {
+        console.error('[reset] fetch error:', e);
+        setStatus('Reset error: ' + e.message);
+    }
+    clearBusy();
+    console.log('[reset] resetSession done, conv children=', document.getElementById('conversation').children.length);
+}
+
+async function refreshPromptList() {
+    try {
+        const [promptsResp, stateResp] = await Promise.all([fetch('/prompts'), fetch('/state')]);
+        const data = await promptsResp.json();
+        const state = await stateResp.json();
+        const lastUsed = state.last_prompt;
+        const sel = document.getElementById('saved-prompts');
+        sel.innerHTML = '<option value="">-- Saved Prompts --</option>';
+        data.prompts.forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p.file;
+            opt.textContent = p.name + ' (T=' + p.T + ')';
+            opt.title = p.text;
+            if (p.file === lastUsed) opt.selected = true;
+            sel.appendChild(opt);
+        });
+        return lastUsed;
+    } catch(e) { return null; }
+}
+
+async function savePrompt() {
+    const name = document.getElementById('prompt-name').value.trim();
+    if (!name) { setStatus('Enter a name to save'); return; }
+    setStatus('Saving prompt...');
+    try {
+        const resp = await fetch('/save-prompt', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({name}),
+        });
+        const data = await resp.json();
+        if (data.ok) {
+            setStatus('Saved: ' + name);
+            refreshPromptList();
+        } else {
+            setStatus('Save failed: ' + data.error);
+        }
+    } catch(e) { setStatus('Save error: ' + e.message); }
+}
+
+async function loadSavedPrompt(file) {
+    file = file || document.getElementById('saved-prompts').value;
+    if (!file) { setStatus('Select a prompt first'); return; }
+    setBusy('Loading prompt...');
+    try {
+        const resp = await fetch('/load-prompt', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({file}),
+        });
+        const data = await resp.json();
+        if (data.ok) {
+            document.getElementById('prompt-info').textContent = data.name + ' | T=' + data.T + ' | ' + (data.text || '(no text)');
+            if (data.text) document.getElementById('prompt-text').value = data.text;
+            document.getElementById('conversation').innerHTML = '';
+            document.getElementById('chunks').textContent = '';
+            setStatus('Ready. T=' + data.T);
+            loadPromptAudio();
+        } else {
+            setStatus('Load failed: ' + data.error);
+        }
+    } catch(e) { setStatus('Load error: ' + e.message); }
+    clearBusy();
+}
+
+let currentPlayback = null;
+let remoteAudioEl = null;
+
+function stopCurrentPlayback() {
+    if (currentPlayback) {
+        currentPlayback.audio.pause();
+        currentPlayback.audio.currentTime = 0;
+        currentPlayback.btn.textContent = 'Play';
+        currentPlayback = null;
+    }
+}
+
+let _fadeInterval = null;
+function fadeOutPlayback(ms = 150) {
+    if (!remoteAudioEl) return;
+    if (_fadeInterval) clearInterval(_fadeInterval);
+    const steps = 10;
+    const dt = ms / steps;
+    const dv = remoteAudioEl.volume / steps;
+    _fadeInterval = setInterval(() => {
+        remoteAudioEl.volume = Math.max(0, remoteAudioEl.volume - dv);
+        if (remoteAudioEl.volume <= 0.01) {
+            remoteAudioEl.volume = 0;
+            clearInterval(_fadeInterval);
+            _fadeInterval = null;
+        }
+    }, dt);
+}
+
+function fadeInPlayback(ms = 50) {
+    if (!remoteAudioEl) return;
+    if (_fadeInterval) clearInterval(_fadeInterval);
+    remoteAudioEl.volume = 1;
+}
+
+function addMessage(role, text) {
+    const conv = document.getElementById('conversation');
+    const div = document.createElement('div');
+    div.className = 'msg ' + role;
+    div.innerHTML = '<span class="role">' + role + '</span> ' + text;
+    conv.appendChild(div);
+    conv.scrollTop = conv.scrollHeight;
+    return div;
+}
+
+async function cancelGeneration() {
+    try {
+        await fetch('/cancel', {method: 'POST'});
+    } catch(e) {}
+    document.getElementById('cancel-btn').style.display = 'none';
+    stopCurrentPlayback();
+    setStatus('Cancelled');
+}
+
+function setStatus(text) {
+    document.getElementById('status').textContent = text;
+}
+
+function addLog(text, level) {
+    level = level || 'info';
+    const log = document.getElementById('log');
+    const div = document.createElement('div');
+    div.className = 'log-entry ' + level;
+    const ts = new Date().toLocaleTimeString('en-GB', {hour12: false});
+    div.innerHTML = '<span class="ts">' + ts + '</span>' + text;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+    // Keep last 200 entries
+    while (log.children.length > 200) log.removeChild(log.firstChild);
+}
+
+const _tasks = {};
+function updateTask(data) {
+    const {task_id, description, status, result, error, created} = data;
+    _tasks[task_id] = {description, status, result, error, created};
+    renderTasks();
+}
+function renderTasks() {
+    const section = document.getElementById('tasks-section');
+    const list = document.getElementById('tasks-list');
+    const ids = Object.keys(_tasks);
+    if (!ids.length) { section.style.display = 'none'; return; }
+    section.style.display = '';
+    ids.sort((a, b) => (_tasks[b].created || 0) - (_tasks[a].created || 0));
+    list.innerHTML = ids.map(id => {
+        const t = _tasks[id];
+        const st = t.status || 'running';
+        const desc = t.description || id;
+        const hasResult = t.result || t.error;
+        const resultText = t.error ? 'Error: ' + t.error : (t.result || '');
+        const ago = t.created ? timeSince(t.created) : '';
+        const expandHint = hasResult ? '<span class="task-expand">click to expand</span>' : '';
+        return '<div class="task-item" id="task-' + id + '" onclick="toggleTaskResult(this)">'
+            + '<div class="task-header">'
+            + '<span class="task-desc">' + esc(desc) + '</span>'
+            + '<span class="task-actions">'
+            + '<span class="task-status ' + st + '">' + st + '</span>'
+            + '<span class="task-delete" title="Delete" onclick="deleteTask(event, \'' + id + '\')">&times;</span>'
+            + '</span>'
+            + '</div>'
+            + (ago ? '<div class="task-time">' + ago + expandHint + '</div>' : '')
+            + (hasResult ? '<div class="task-result">' + esc(resultText) + '</div>' : '')
+            + '</div>';
+    }).join('');
+}
+function toggleTaskResult(el) { el.classList.toggle('expanded'); }
+async function deleteTask(ev, id) {
+    if (ev) { ev.stopPropagation(); ev.preventDefault(); }
+    try {
+        const r = await fetch('/tasks/delete', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({task_id: id}),
+        });
+        if (!r.ok) { console.warn('delete task failed:', r.status, await r.text()); return; }
+        // Optimistic remove — the ws task_removed event will also clear it.
+        delete _tasks[id];
+        renderTasks();
+    } catch (e) { console.warn('delete task error:', e); }
+}
+function timeSince(ts) {
+    const s = Math.floor(Date.now() / 1000 - ts);
+    if (s < 60) return 'just now';
+    if (s < 3600) return Math.floor(s / 60) + 'm ago';
+    if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+    return Math.floor(s / 86400) + 'd ago';
+}
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+function updateMemories(memories) {
+    const section = document.getElementById('memories-section');
+    const list = document.getElementById('memories-list');
+    if (!memories.length) {
+        section.style.display = 'none';
+        return;
+    }
+    section.style.display = '';
+    list.innerHTML = memories.map((m, i) =>
+        '<div class="memory-item">'
+        + '<span class="memory-text">' + esc(m) + '</span>'
+        + '<span class="memory-delete" title="Forget this" onclick="deleteMemory(' + i + ')">&times;</span>'
+        + '</div>'
+    ).join('');
+}
+
+async function deleteMemory(index) {
+    try {
+        const r = await fetch('/memories/delete', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({index: index}),
+        });
+        if (!r.ok) console.warn('delete memory failed:', r.status);
+        // Server will push an updated `memories` ws event.
+    } catch (e) { console.warn('delete memory error:', e); }
+}
+
+async function clearAllMemories() {
+    if (!confirm('Forget every memory?')) return;
+    try {
+        const r = await fetch('/memories/clear', {method: 'POST'});
+        if (!r.ok) console.warn('clear memories failed:', r.status);
+    } catch (e) { console.warn('clear memories error:', e); }
+}
+
+async function clearAllTasks() {
+    if (!confirm('Delete every task (including running)?')) return;
+    try {
+        const r = await fetch('/tasks/clear', {method: 'POST'});
+        if (!r.ok) console.warn('clear tasks failed:', r.status);
+    } catch (e) { console.warn('clear tasks error:', e); }
+}
+
+init();
+</script>
+</body>
+</html>

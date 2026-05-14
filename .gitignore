@@ -166,8 +166,16 @@ cython_debug/
 *.wav
 *.mp3
 *.tar.gz
-
-*.pt
-*.json
-checkpoints/
+*.safetensors
 *.opus
+*.log
+*.json
+!sample_texts.json
+checkpoints/
+
+# Local scratch / dumps / outputs
+scratch/
+debug_dump/
+outputs/
+prompts/
+todo.md
