@@ -20,7 +20,7 @@ Vui is a real-time voice assistant: speak into your mic, the model transcribes, 
 - **Vui Nano (300M)** — Llama-style decoder + RQ-Transformer head over the Qwen3-TTS-12Hz codec
 - **Real-time voice loop** — WebRTC + WebSocket pipeline (ASR → LLM → TTS) with a browser UI, VAD-driven turn taking, speculative LLM prefill while you're still speaking, sentence-level TTS chunking with backpressure
 - **Barge-in** — start talking mid-reply, the model cancels and listens
-- **Streaming TTS** — ~5× realtime on a 4090, bf16 inference, CUDA graphs
+- **Streaming TTS** — ~9× realtime on a 4090, bf16 inference, CUDA graphs
 - **OpenAI Realtime API compatible** — drop-in `ws://…/v1/realtime` for clients written against OpenAI's spec ([`docs/realtime-api.md`](docs/realtime-api.md))
 - **One-shot voice-note REST endpoint** — `POST /v1/voice-note` runs the whole ASR → LLM → TTS pipeline in a single HTTP call (audio in, JSON out)
 - **Standalone TTS demo** — `demo.py` Gradio playground for the model on its own
@@ -255,7 +255,7 @@ A 300M autoregressive LM over the Qwen3-TTS speech codec — the first in the Vu
 - **300M parameters**, Llama-style decoder + RQ-Transformer head — 768 dim, 22 layers, 8 heads
 - **Codec**: [Qwen3-TTS-Tokenizer-12Hz](https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz) — 16 codebooks of 2048 entries at 12.5 Hz, 24 kHz audio (decoded), pure-PyTorch reimplementation in `src/vui/qwen_codec.py`
 - **Speaker encoder**: ECAPA-TDNN from `Qwen3-TTS-12Hz-0.6B-Base` (8.9M params, 1024-dim) — used at training time to embed reference speakers
-- **Output**: 16 kHz audio, bf16 inference, ~5× realtime streaming on a 4090
+- **Output**: 16 kHz audio, bf16 inference, ~9× realtime streaming on a 4090
 
 ### Voices & voice cloning
 
