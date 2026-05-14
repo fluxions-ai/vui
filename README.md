@@ -276,6 +276,8 @@ with engine.new_row() as row:
     )
 ```
 
+**Tip: try turning repetition penalty off.** `GenConfig` defaults `rep_penalty=1.1` to break long silence/filler loops, but it can flatten prosody and distort natural repetition. Setting it to `0` (anything `<= 1.0` disables the penalty path, see `inference.py:539`) often gives more natural-sounding output — worth trying if generations sound stilted or over-corrected.
+
 For long voice prompts (>15s) you need proper multi-segment chunking — `vui.prompt_utils.build_prompt_segments` does ASR + forced alignment + sentence-boundary splits at ~10s targets so the model keeps its speaker conditioning across the full reference. Full Python guide covering chunked prompts, streaming, continuous batching, codes-only decode, and the MLX path: [`docs/python-api.md`](docs/python-api.md).
 
 ## Hardware
