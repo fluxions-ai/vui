@@ -25,7 +25,7 @@ Measured on a running server (`nvidia-smi --query-compute-apps`, Ollama `/api/ps
 | Ollama `qwen3.5:4b` @ `num_ctx=8192` | **~6.1 GiB** | hybrid SSM+attention 4.7B Q4_K_M |
 | **Full stack co-located** | **~12 GiB** | TTS + GPU ASR + Ollama on one card |
 | With `moonshine.*` ASR (CPU) | **~8 GiB** | ASR moves off-GPU; TTS + Ollama remain |
-| With Ollama on host (recommended compose layout) | ~5.5 GiB | LLM off-GPU — see [readme](../readme.md#quick-start-docker-compose-recommended) |
+| With Ollama on host (recommended compose layout) | ~5.5 GiB | LLM off-GPU — see [readme](../README.md#quick-start-docker-compose-recommended) |
 
 ---
 
@@ -40,7 +40,7 @@ Measured on a running server (`nvidia-smi --query-compute-apps`, Ollama `/api/ps
 | FlashKVCache pre-allocated by [`Decoder.allocate_flash_kv_cache`](../src/vui/model.py) (22 layers × bf16) | 132 MiB at `max_seqlen=2048`; up to ~1.3 GiB at the trained ceiling |
 | flash-attn workspace + CUDA graphs + activations + CUDA ctx | ~1–2 GiB residual |
 
-Backbone arch (from [`readme`](../readme.md#vui-model)): 768 dim, 22 layers, 8 heads → `head_dim = 96`. No GQA — `n_kv_heads = n_heads = 8`.
+Backbone arch (from [`readme`](../README.md#vui-nano)): 768 dim, 22 layers, 8 heads → `head_dim = 96`. No GQA — `n_kv_heads = n_heads = 8`.
 
 ### ASR worker — measured 0.85 GiB (default)
 
@@ -145,9 +145,9 @@ The `num_ctx` table above shows the only meaningful lever: dropping `num_ctx` fr
 | Ollama on host (recommended compose layout) | 4.6 | 0.85 | — | ~5.5 GiB |
 | Ollama on host + `moonshine.*` ASR | 4.6 | 0 | — | ~4.6 GiB |
 | LLM on remote server + `moonshine.*` ASR | 4.6 | 0 | — | ~4.6 GiB |
-| Apple Silicon (MLX) | unified memory | — | — | varies — see [readme](../readme.md#hardware) |
+| Apple Silicon (MLX) | unified memory | — | — | varies — see [readme](../README.md#hardware) |
 
-A 12 GB card (e.g. 3060 12GB / 4070) runs the full stack on one GPU. An 8 GB card needs either the moonshine-ASR swap above or the [recommended docker-compose layout](../readme.md#quick-start-docker-compose-recommended) that puts Ollama on the host. To go below that — e.g. on a laptop GPU or a small VPS — point the LLM at a remote box ([`configuration.md` → Custom model server](configuration.md#custom-model-server)); both the conversation and thoughts streams will use it.
+A 12 GB card (e.g. 3060 12GB / 4070) runs the full stack on one GPU. An 8 GB card needs either the moonshine-ASR swap above or the [recommended docker-compose layout](../README.md#quick-start-docker-compose-recommended) that puts Ollama on the host. To go below that — e.g. on a laptop GPU or a small VPS — point the LLM at a remote box ([`configuration.md` → Custom model server](configuration.md#custom-model-server)); both the conversation and thoughts streams will use it.
 
 ---
 

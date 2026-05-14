@@ -339,39 +339,3 @@ def get_tokenizer(config: TokenizerConfig | None = None) -> VuiTokenizer:
     if _default_tokenizer is None or config is not None:
         _default_tokenizer = VuiTokenizer(config)
     return _default_tokenizer
-
-
-if __name__ == "__main__":
-    tok = VuiTokenizer()
-
-    print(f"Vocab size: {tok.vocab_size}")
-    print(f"Base vocab: 0-{tok._base_vocab_size - 1}")
-    print(f"Byte tokens: {tok.byte_offset}-{tok.special_offset - 1}")
-    print(
-        f"Special tokens: {tok.special_offset}-{tok.special_offset + len(tok.special_tokens) - 1}"
-    )
-    print()
-
-    test_cases = [
-        "Hello world",
-        "Hello [pause] world",
-        "Say |hello| to me",
-        "The word |pneumonoultramicroscopicsilicovolcanoconiosis| is long",
-        "[0] <|0.00|>Hello there<|1.50|>",
-        "Multiple |spelled| words |here| in text",
-    ]
-
-    for text in test_cases:
-        print(f"Input: {text}")
-        tokens = tok.encode(text)
-        print(f"  Tokens ({len(tokens)}): {tokens[:20].tolist()}...")
-        print(f"  Decoded: {tok.decode(tokens)}")
-        print()
-
-    print("Batch encoding test:")
-    batch = tok(
-        ["Hello world", "Goodbye [pause] world"],
-        padding="longest",
-    )
-    print(f"  input_ids shape: {batch['input_ids'].shape}")
-    print(f"  attention_mask shape: {batch['attention_mask'].shape}")
