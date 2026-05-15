@@ -293,11 +293,20 @@ class StreamServer:
         self.asr_model_arch = asr_model_arch
         self.session = SessionState()
 
-        self.tts_cmd_queue = Queue()
-        self.tts_audio_queue = Queue()
-        self.asr_cmd_queue = Queue()
-        self.asr_result_queue = Queue()
-        self.vad_queue = Queue()
+        if IS_APPLE_SILICON:
+            # Threads: use stdlib queue (no pickle overhead, no OS-level locks)
+            import queue as _queue
+            self.tts_cmd_queue = _queue.Queue()
+            self.tts_audio_queue = _queue.Queue()
+            self.asr_cmd_queue = _queue.Queue()
+            self.asr_result_queue = _queue.Queue()
+            self.vad_queue = _queue.Queue()
+        else:
+            self.tts_cmd_queue = Queue()
+            self.tts_audio_queue = Queue()
+            self.asr_cmd_queue = Queue()
+            self.asr_result_queue = Queue()
+            self.vad_queue = Queue()
 
         self.tts_proc: Process | None = None
         self.asr_proc: Process | None = None
@@ -467,33 +476,82 @@ class StreamServer:
     def start_workers(self):
         import multiprocessing
 
-        self.tts_cancel_event = multiprocessing.Event()
+        if IS_APPLE_SILICON:
+            import threading
+            self.tts_cancel_event = threading.Event()
+        else:
+            self.tts_cancel_event = multiprocessing.Event()
         print("Starting worker processes...")
-        self.tts_proc = Process(
-            target=tts_process,
-            args=(
-                self.tts_cmd_queue,
-                self.tts_audio_queue,
-                self.checkpoint_path,
-                self.tts_cancel_event,
-            ),
-            daemon=False,
-        )
-        self.asr_proc = Process(
-            target=asr_process,
-            args=(
-                self.asr_cmd_queue,
-                self.asr_result_queue,
-                self.vad_queue,
-                self.asr_model_arch,
-            ),
-            daemon=True,
-        )
-        self.tts_proc.start()
-        self.asr_proc.start()
-        print(
-            f"Workers started: TTS(pid={self.tts_proc.pid}), ASR(pid={self.asr_proc.pid})"
-        )
+
+        if IS_APPLE_SILICON:
+            # Apple Silicon: run workers as threads in one process to avoid
+            # Metal GPU deadlocks between MLX (TTS) and torch (ASR/VAD)
+            # in separate spawned subprocesses.
+            # Start TTS first and wait for it to finish loading torch models
+            # before starting ASR (both use torch, GIL contention blocks loading).
+            import threading
+
+            self.tts_proc = threading.Thread(
+                target=tts_process,
+                args=(
+                    self.tts_cmd_queue,
+                    self.tts_audio_queue,
+                    self.checkpoint_path,
+                    self.tts_cancel_event,
+                ),
+                daemon=True,
+            )
+            self.tts_proc.start()
+            # Wait for TTS to finish loading (all torch models loaded at init)
+            try:
+                resp = self.tts_audio_queue.get(timeout=120)
+                if resp.get("type") == "ready":
+                    self.tts_ready = True
+                    self._tts_ready = True
+                    print("[main] TTS worker ready")
+            except Exception as e:
+                print(f"[main] TTS startup timeout: {e}")
+
+            self.asr_proc = threading.Thread(
+                target=asr_process,
+                args=(
+                    self.asr_cmd_queue,
+                    self.asr_result_queue,
+                    self.vad_queue,
+                    self.asr_model_arch,
+                ),
+                daemon=True,
+            )
+            self.asr_proc.start()
+            print(
+                f"Workers started as threads (Apple Silicon single-process mode)"
+            )
+        else:
+            self.tts_proc = Process(
+                target=tts_process,
+                args=(
+                    self.tts_cmd_queue,
+                    self.tts_audio_queue,
+                    self.checkpoint_path,
+                    self.tts_cancel_event,
+                ),
+                daemon=False,
+            )
+            self.asr_proc = Process(
+                target=asr_process,
+                args=(
+                    self.asr_cmd_queue,
+                    self.asr_result_queue,
+                    self.vad_queue,
+                    self.asr_model_arch,
+                ),
+                daemon=True,
+            )
+            self.tts_proc.start()
+            self.asr_proc.start()
+            print(
+                f"Workers started: TTS(pid={self.tts_proc.pid}), ASR(pid={self.asr_proc.pid})"
+            )
 
     def stop_workers(self):
         for q in [self.tts_cmd_queue, self.asr_cmd_queue]:
@@ -504,7 +562,7 @@ class StreamServer:
         for p in [self.tts_proc, self.asr_proc]:
             if p is not None and p.is_alive():
                 p.join(timeout=5)
-                if p.is_alive():
+                if p.is_alive() and hasattr(p, "terminate"):
                     p.terminate()
 
     def _derive_worker_states(self) -> dict[str, str]:

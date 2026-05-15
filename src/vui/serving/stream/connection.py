@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 from typing import TYPE_CHECKING
@@ -594,6 +595,26 @@ async def warmup(srv: StreamServer):
     print(f"[main] LLM probe: {'up' if llm_up else 'DOWN'}")
     await srv._send_llm_status()
 
+    # Warn if OLLAMA_NUM_PARALLEL < 2 (server uses 2 concurrent LLM calls per turn)
+    if llm_up:
+        try:
+            from vui.serving.stream.llm_backend import get_backend
+            base_url = get_backend().base_url
+            async with httpx.AsyncClient(timeout=3) as client:
+                r = await client.get(f"{base_url}/api/ps")
+                if r.status_code == 200:
+                    import os
+                    np = os.environ.get("OLLAMA_NUM_PARALLEL", "1")
+                    if int(np) < 2:
+                        print(
+                            "[main] WARN: OLLAMA_NUM_PARALLEL is not set (default 1). "
+                            "The server makes 2 concurrent LLM calls per turn. "
+                            "Set OLLAMA_NUM_PARALLEL=2 for better latency: "
+                            "launchctl setenv OLLAMA_NUM_PARALLEL 2"
+                        )
+        except Exception:
+            pass
+
     _spawn(_task_server_poll_loop(srv), "task_server_poll")
     _spawn(_llm_poll_loop(srv), "llm_poll")
 
@@ -676,15 +697,20 @@ async def warmup(srv: StreamServer):
             await srv._log(f"MLX model setup failed, falling back to GGUF: {e}", "warn")
             srv.ollama_model = GGUF_MODEL_NAME
 
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{OLLAMA_URL}/api/ps")
-            loaded = [m["name"] for m in resp.json().get("models", []) if m.get("name")]
-            if loaded:
-                srv.ollama_model = loaded[0]
-                await srv._log(f"Using loaded Ollama model: {srv.ollama_model}")
-    except Exception:
-        pass
+    explicit_model = os.environ.get("VUI_OLLAMA_MODEL")
+    if explicit_model:
+        srv.ollama_model = explicit_model
+        await srv._log(f"Using VUI_OLLAMA_MODEL={explicit_model}")
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(f"{OLLAMA_URL}/api/ps")
+                loaded = [m["name"] for m in resp.json().get("models", []) if m.get("name")]
+                if loaded:
+                    srv.ollama_model = loaded[0]
+                    await srv._log(f"Using loaded Ollama model: {srv.ollama_model}")
+        except Exception:
+            pass
 
     async def _prefill_system():
         try:

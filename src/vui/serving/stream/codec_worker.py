@@ -13,65 +13,58 @@ import numpy as np
 import torch
 from torch.multiprocessing import Queue
 
-from vui.qwen_codec import QwenCodecDecoder
-
 
 class CodecWorker:
     def __init__(self):
-        print("[CODEC] Loading QwenCodecDecoder on MPS...")
-        self.codec_dec = QwenCodecDecoder.from_pretrained().to("mps").float().eval()
-        self._quant_buf = None
-        self._transformer_out = None
+        import mlx.core as mx
+
+        print("[CODEC] Loading MLX codec decoder...")
+        from vui.mlx.tts.codec import load_codec_decoder_mlx
+
+        self.codec = load_codec_decoder_mlx()
+        self._mx = mx
         self._warmup()
 
     def _warmup(self):
-        """Warm up codec MPS shaders."""
-        dummy_codes = torch.zeros(1, 16, 1, dtype=torch.long, device="mps")
-        self.codec_dec.pre_transformer.reset_cache()
-        with torch.inference_mode():
-            self.codec_dec.decode_cached_frame(dummy_codes, vocoder_ctx=1)
-        self.codec_dec.pre_transformer.reset_cache()
-        self._quant_buf = None
-        self._transformer_out = None
+        """Warm up MLX codec."""
+        mx = self._mx
+        dummy = mx.zeros((1, 16, 1), dtype=mx.int32)
+        audio = self.codec.forward(dummy)
+        mx.eval(audio)
+        self.codec.reset_state()
         print("[CODEC] Warmed up")
 
     def prefill_context(self, codes_pt: torch.Tensor):
-        """Prefill codec KV cache with context codes.
+        """Prefill codec streaming context with prompt codes.
 
-        codes_pt: (B, Q, T) on CPU, will be moved to MPS.
+        codes_pt: (B, Q, T) on CPU torch tensor.
         """
+        mx = self._mx
         t0 = time.perf_counter()
-        codes_pt = codes_pt.to("mps")
-
-        with torch.inference_mode():
-            # decode_cached_prefill does all the work: quantizer decode, pre_conv, transformer
-            self.codec_dec.decode_cached_prefill(codes_pt)
-
+        codes_mx = mx.array(codes_pt.numpy().astype(np.int32))
+        self.codec.reset_state()
+        self.codec.prefill(codes_mx)
+        mx.eval(self.codec.parameters())
         t_prefill = (time.perf_counter() - t0) * 1000
         print(f"[CODEC] Prefilled: {codes_pt.shape[2]} frames in {t_prefill:.1f}ms")
 
     def decode_frame(
         self, codes_pt: torch.Tensor, vocoder_ctx: int = 10
     ) -> torch.Tensor:
-        """Decode single frame using KV-cached path.
+        """Decode single frame using streaming context.
 
-        codes_pt: (1, Q, 1) on CPU, will be moved to MPS.
-        Returns: (1, 1, T*1920) audio on CPU.
+        codes_pt: (1, Q, 1) on CPU torch tensor.
+        Returns: (S,) audio on CPU torch tensor.
         """
-        codes_pt = codes_pt.to("mps")
-
-        with torch.inference_mode(), torch.autocast("mps", enabled=False):
-            audio = self.codec_dec.decode_cached_frame(
-                codes_pt, vocoder_ctx=vocoder_ctx
-            )
-
-        return audio[0, 0].detach().float().cpu()
+        mx = self._mx
+        codes_mx = mx.array(codes_pt.numpy().astype(np.int32))
+        audio = self.codec.decode_frame(codes_mx)
+        mx.eval(audio)
+        return torch.from_numpy(np.array(audio.flatten())).float()
 
     def reset(self):
         """Reset codec state."""
-        self.codec_dec.pre_transformer.reset_cache()
-        self._quant_buf = None
-        self._transformer_out = None
+        self.codec.reset_state()
 
 
 def codec_process(cmd_queue: Queue, audio_queue: Queue):

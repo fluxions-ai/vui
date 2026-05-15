@@ -90,7 +90,7 @@ class TTSStream:
         m = self.model
         Q = m.rq_transformer.n_quantizers
         CS = m.rq_transformer.codebook_size
-        rq_temp = min(temperature, 0.9)
+        rq_temp = temperature
         rep = RepPenalty(Q, CS, rep_penalty, rep_window)
 
         # Re-inject speaker token before each new turn (matches training format)

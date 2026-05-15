@@ -30,8 +30,9 @@ class RepPenalty:
         self.penalty = penalty
         self.window = window
         self.log_p = math.log(max(penalty, 1.001))
-        # Ring buffer of past codes: (window, Q)
-        self.history = mx.zeros((max(window, 1), n_quantizers), dtype=mx.int32)
+        # Ring buffer of past codes: (window, Q). window=0 means unbounded.
+        buf_size = window if window > 0 else 512
+        self.history = mx.zeros((buf_size, n_quantizers), dtype=mx.int32)
         self.pos = 0
         self.count = 0
 
@@ -49,8 +50,10 @@ class RepPenalty:
         active = self.history[: self.count, 0]  # (count,)
         freq = mx.zeros((self.CS,))
         freq = freq.at[active].add(mx.ones((active.shape[0],)))
-        bias = -freq * self.log_p
-        return logits + bias
+        # Multiplicative penalty matching PyTorch: divide positive logits,
+        # multiply negative logits by penalty^count
+        factor = mx.power(self.penalty, freq)
+        return mx.where(logits > 0, logits / factor, logits * factor)
 
     def rq_logit_bias(self) -> mx.array | None:
         if self.penalty <= 1.0 or self.count == 0:
@@ -81,6 +84,7 @@ def prefill_prompt(
     prompt_text: str,
     prompt_codes: mx.array,
     spk_emb: mx.array | None = None,
+    speaker_change: bool = False,
 ):
     model.decoder.reset_cache()
     model.decoder.make_cache()
@@ -90,10 +94,11 @@ def prefill_prompt(
         spk_token = model.spk_proj(spk_emb).reshape(1, 1, -1)
         model.decoder(spk_token)
 
-    # Prompt text + [SC]
+    # Prompt text (+ [SC] only when next speaker differs)
     ids = model.text_tokenizer.encode(simple_clean(prompt_text))
     ids_mx = mx.array(np.array(ids, dtype=np.int32))
-    ids_mx = mx.concatenate([ids_mx, mx.array([model.sc_id])])
+    if speaker_change:
+        ids_mx = mx.concatenate([ids_mx, mx.array([model.sc_id])])
     text_emb = model.token_emb(ids_mx[None])
     model.decoder(text_emb)
 
@@ -122,7 +127,7 @@ def generate(
     """Generate audio codes from text. Returns (codes_list, n_frames, gen_time)."""
     Q = model.rq_transformer.n_quantizers
     CS = model.rq_transformer.codebook_size
-    rq_temp = min(temperature, 0.9)
+    rq_temp = temperature
     rep = RepPenalty(Q, CS, rep_penalty, rep_window)
 
     if compile_rq:

@@ -278,7 +278,7 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 SETTINGS_FILE = CACHE_DIR / "demo_settings.json"
 
 DEFAULTS = {
-    "temperature": 0.9,
+    "temperature": 0.7,
     "top_k": 50,
     "use_top_p": False,
     "top_p": 1.0,
@@ -291,7 +291,7 @@ DEFAULTS = {
     "sq_nq_loud": 5.0,
     "wps_score": 0.0,
     "rep_penalty": 1.1,
-    "rep_window": 0,
+    "rep_window": 24,
     "chunk_words": 20,
     "n_codebooks": 0,
     "eos_threshold": 0.45,
@@ -1488,4 +1488,4 @@ document.addEventListener('DOMContentLoaded', function() {
     )
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", share=True)
+    demo.launch(server_name="0.0.0.0")

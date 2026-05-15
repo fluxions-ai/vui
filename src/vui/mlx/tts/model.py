@@ -31,7 +31,7 @@ class KVCache:
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-5):
+    def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.weight = mx.ones((dim,))
         self.eps = eps
@@ -124,11 +124,11 @@ class LlamaMLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, d_model, n_heads, n_kv_heads, intermediate_size=None):
+    def __init__(self, d_model, n_heads, n_kv_heads, intermediate_size=None, norm_eps=1e-5):
         super().__init__()
-        self.attn_norm = RMSNorm(d_model)
+        self.attn_norm = RMSNorm(d_model, eps=norm_eps)
         self.attn = MHA(d_model, n_heads, n_kv_heads)
-        self.mlp_norm = RMSNorm(d_model)
+        self.mlp_norm = RMSNorm(d_model, eps=norm_eps)
         self.mlp = LlamaMLP(d_model, intermediate_size)
 
     def __call__(self, x, rope, cache=None):
@@ -156,7 +156,7 @@ class Decoder(nn.Module):
             Block(d_model, n_heads, n_kv_heads, intermediate_size)
             for _ in range(n_layers)
         ]
-        self.norm = RMSNorm(d_model)
+        self.norm = RMSNorm(d_model, eps=1e-5)
         self.rope = RoPE(d_model // n_heads, max_seqlen, rope_theta)
         self.kv_caches: list[KVCache] = []
 
@@ -257,6 +257,25 @@ class RQBlock(nn.Module):
         x = x + self.w2(nn.silu(self.w1(h)) * self.w3(h))
         return x, (k, v)
 
+    def forward_kv(self, x, k_cache, v_cache, pos):
+        """Single-token forward with pre-allocated KV cache. pos = current write position."""
+        B = x.shape[0]
+        h = self.attn_norm(x)
+        qkv = self.Wqkv(h).reshape(B, 1, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+        # Write into pre-allocated cache
+        k_cache[:, :, pos:pos+1, :] = k.transpose(0, 2, 1, 3)
+        v_cache[:, :, pos:pos+1, :] = v.transpose(0, 2, 1, 3)
+        q = q.transpose(0, 2, 1, 3)
+        k_all = k_cache[:, :, :pos+1, :]
+        v_all = v_cache[:, :, :pos+1, :]
+        out = mx.fast.scaled_dot_product_attention(q, k_all, v_all, scale=self.scale, mask=None)
+        out = out.transpose(0, 2, 1, 3).reshape(B, 1, -1)
+        x = x + self.out_proj(out)
+        h = self.mlp_norm(x)
+        x = x + self.w2(nn.silu(self.w1(h)) * self.w3(h))
+        return x
+
 
 class RQTransformer(nn.Module):
     def __init__(
@@ -334,6 +353,85 @@ class RQTransformer(nn.Module):
                     logits_i < top_vals[:, -1:], mx.array(-1e9), logits_i
                 )
             next_code = mx.random.categorical(logits_i)
+            codes.append(next_code)
+
+        return mx.stack(codes, axis=1)
+
+    def generate_kv(
+        self,
+        backbone_hidden,
+        code_0,
+        temperature=0.7,
+        top_k=None,
+        logit_bias=None,
+        max_q: int = 0,
+    ):
+        """Generate with pre-allocated KV caches (no concatenation)."""
+        Q = min(max_q, self.n_quantizers) if max_q > 0 else self.n_quantizers
+        n_blocks = len(self.blocks)
+        n_h = self.blocks[0].n_heads
+        h_d = self.blocks[0].head_dim
+        D = self.rq_dim
+        proj = (
+            self.backbone_proj(backbone_hidden)
+            if self.backbone_proj
+            else backbone_hidden
+        )
+
+        # Pre-allocate KV caches for all blocks: (1, n_heads, Q, head_dim)
+        k_caches = [mx.zeros((1, n_h, Q, h_d)) for _ in range(n_blocks)]
+        v_caches = [mx.zeros((1, n_h, Q, h_d)) for _ in range(n_blocks)]
+
+        # Prefill positions 0 (backbone) and 1 (code_0)
+        tok0 = (proj + self.pos_emb.weight[0])[:, None, :]
+        tok1 = (self.code_emb.embedding(code_0) + self.pos_emb.weight[1])[:, None, :]
+        seq2 = mx.concatenate([tok0, tok1], axis=1)  # (1, 2, D)
+
+        for li, block in enumerate(self.blocks):
+            h = block.attn_norm(seq2)
+            B, T2 = 1, 2
+            qkv = block.Wqkv(h).reshape(B, T2, 3, n_h, h_d)
+            q = qkv[:, :, 0].transpose(0, 2, 1, 3)
+            k = qkv[:, :, 1].transpose(0, 2, 1, 3)
+            v = qkv[:, :, 2].transpose(0, 2, 1, 3)
+            k_caches[li][:, :, :2, :] = k
+            v_caches[li][:, :, :2, :] = v
+            mask = mx.triu(mx.full((2, 2), -1e9), k=1)
+            out = mx.fast.scaled_dot_product_attention(q, k, v, scale=block.scale, mask=mask)
+            out = out.transpose(0, 2, 1, 3).reshape(B, T2, D)
+            seq2 = seq2 + block.out_proj(out)
+            h2 = block.mlp_norm(seq2)
+            seq2 = seq2 + block.w2(nn.silu(block.w1(h2)) * block.w3(h2))
+
+        # Predict code 1 from position 1 hidden
+        h_out = self.norm(seq2[:, 1])
+        logits = h_out @ self.head_W[0].T
+        if logit_bias is not None:
+            logits = logits + logit_bias[0:1]
+        logits = logits / temperature
+        if top_k is not None:
+            top_vals = mx.topk(logits, top_k, axis=-1)
+            logits = mx.where(logits < top_vals[:, -1:], mx.array(-1e9), logits)
+        next_code = mx.random.categorical(logits)
+        codes = [code_0, next_code]
+
+        # Autoregressive single-token steps with pre-allocated KV
+        for i in range(1, Q - 1):
+            offset = i * self.codebook_size
+            tok = (
+                self.code_emb.embedding(next_code + offset) + self.pos_emb.weight[i + 1]
+            )[:, None, :]  # (1, 1, D)
+            for li, block in enumerate(self.blocks):
+                tok = block.forward_kv(tok, k_caches[li], v_caches[li], i + 1)
+            h_out = self.norm(tok[:, 0])
+            logits = h_out @ self.head_W[i].T
+            if logit_bias is not None:
+                logits = logits + logit_bias[i : i + 1]
+            logits = logits / temperature
+            if top_k is not None:
+                top_vals = mx.topk(logits, top_k, axis=-1)
+                logits = mx.where(logits < top_vals[:, -1:], mx.array(-1e9), logits)
+            next_code = mx.random.categorical(logits)
             codes.append(next_code)
 
         return mx.stack(codes, axis=1)

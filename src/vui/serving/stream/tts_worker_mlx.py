@@ -6,6 +6,7 @@ and MPS for codec encode/decode. No CUDA graphs needed.
 
 from __future__ import annotations
 
+import os
 import time
 import traceback
 from multiprocessing import Queue
@@ -18,14 +19,12 @@ import torch
 from vui.inference import simple_clean
 from vui.mlx.tts.generate import (
     CODEC_HZ,
-    _apply_rep_penalty,
-    _compute_rq_logit_bias,
+    RepPenalty,
     _sample_top_k,
-    _update_history,
     compute_cond_bias,
 )
 from vui.mlx.tts.model import VuiMLX
-from vui.mlx.tts.weights import load_from_pytorch
+from vui.mlx.tts.weights import load_quantized
 from vui.serving.stream.tts_worker import chunk_text
 
 PROMPTS_DIR = Path("prompts")
@@ -33,12 +32,11 @@ SQ_DEFAULTS = [0.0, 0.0, 0.0, 0.0, 0.0, 5.0]
 
 
 class MLXTTSEngine:
-    def __init__(self, model: VuiMLX, codec_dec, codec_enc, codec_queue=None):
+    def __init__(self, model: VuiMLX, codec_dec, codec_enc):
         self.model = model
         self.tok = model.text_tokenizer
         self.codec_dec = codec_dec
         self.codec_enc = codec_enc
-        self.codec_queue = codec_queue  # Optional queue for separate codec process
         self.n_q = model.audio_emb.n_quantizers
         self.sc_id = model.sc_id
 
@@ -60,25 +58,28 @@ class MLXTTSEngine:
         model.rq_transformer.compile_forward()
 
     @classmethod
-    def from_checkpoint(
-        cls, checkpoint_path: str, codec_queue: Queue | None = None
-    ) -> "MLXTTSEngine":
-        print("[TTS-MLX] Loading model...")
-        model, config = load_from_pytorch(checkpoint_path)
+    def from_checkpoint(cls, checkpoint_path: str) -> "MLXTTSEngine":
+        precision = os.environ.get("VUI_MLX_PRECISION", "int8")
+        print(f"[TTS-MLX] Loading model ({precision})...")
+        model, config = load_quantized(checkpoint_path, precision)
 
-        print("[TTS-MLX] Loading codec decoder + encoder on MPS...")
-        from vui.qwen_codec import QwenCodecDecoder, QwenCodecEncoder
+        print("[TTS-MLX] Loading MLX codec decoder...")
+        from vui.mlx.tts.codec import load_codec_decoder_mlx
 
-        codec_dec = QwenCodecDecoder.from_pretrained().to("mps").float().eval()
-        codec_enc = QwenCodecEncoder.from_pretrained().to("mps").float().eval()
+        mlx_codec = load_codec_decoder_mlx()
 
-        engine = cls(model, codec_dec, codec_enc, codec_queue=codec_queue)
+        print("[TTS-MLX] Loading codec encoder + speaker encoder...")
+        from vui.qwen_codec import QwenCodecEncoder
+        codec_enc = QwenCodecEncoder.from_pretrained().cpu().float().eval()
+        from vui.qwen_spk_enc import QwenSpeakerEncoder
+        spk_enc = QwenSpeakerEncoder.from_pretrained()
+
+        engine = cls(model, None, codec_enc)
+        engine._mlx_codec = mlx_codec
+        engine._spk_enc = spk_enc
         engine.checkpoint_path = checkpoint_path
 
-        # Warmup
-        print("[TTS-MLX] Warming up...")
         engine.set_conditioning(sq=SQ_DEFAULTS)
-        engine._warmup()
         print("[TTS-MLX] Ready!")
         return engine
 
@@ -297,8 +298,8 @@ class MLXTTSEngine:
         t_turn_start = time.perf_counter()
         model = self.model
         Q, CS = self.Q, self.CS
-        past_codes_per_q: list[list[int]] = [[] for _ in range(Q)]
-        rq_temp = min(temperature, 0.5)
+        rep = RepPenalty(Q, CS, rep_penalty, rep_window)
+        rq_temp = temperature
 
         min_frames = int(0.5 * CODEC_HZ)
         n_words = len(chunk["text"].split())
@@ -317,30 +318,13 @@ class MLXTTSEngine:
                 audio_queue.put(msg)
 
         def decode_audio_frame(codes_mx):
-            codes_np = np.array(codes_mx)
-            codes_pt = torch.from_numpy(codes_np).long().unsqueeze(-1).unsqueeze(0)
+            # codes_mx: (Q,) MLX array -> (1, Q, 1) for codec
+            frame = codes_mx[None, :, None]
             if n_codebooks > 0:
-                codes_pt = codes_pt[:, :n_codebooks]
-
-            # Use codec queue if available, otherwise use local MPS decoder
-            if self.codec_queue is not None:
-                self.codec_queue.put(
-                    {
-                        "cmd": "decode_cached_frame",
-                        "codes": codes_pt,
-                        "vocoder_ctx": 25,
-                    }
-                )
-                resp = self.codec_queue.get(timeout=10)
-                if resp.get("type") == "audio_frame":
-                    return resp["audio"]
-                else:
-                    raise RuntimeError(f"Codec decode failed: {resp}")
-            else:
-                codes_pt = codes_pt.to("mps")
-                with torch.inference_mode(), torch.autocast("mps", enabled=False):
-                    audio = self.codec_dec.decode_cached_frame(codes_pt, vocoder_ctx=25)
-                return audio[0, 0].detach().float().cpu()
+                frame = frame[:, :n_codebooks]
+            audio = self._mlx_codec.decode_frame(frame)
+            mx.eval(audio)
+            return torch.from_numpy(np.array(audio.flatten())).float()
 
         total_secs = 0
         total_frames = 0
@@ -361,40 +345,24 @@ class MLXTTSEngine:
         hidden = out[:, -1]
         code0 = _sample_top_k(model.codec_head(hidden) / temperature, top_k)
 
-        logit_bias = _compute_rq_logit_bias(
-            past_codes_per_q, rep_penalty, rep_window, rq_Q, CS
-        )
+        logit_bias = rep.rq_logit_bias()
         first_codes = model.rq_transformer.generate(
-            hidden, code0, rq_temp, top_k, logit_bias
+            hidden, code0, rq_temp, top_k, logit_bias, max_q=rq_Q
         )
         mx.eval(first_codes)
-        _update_history(past_codes_per_q, first_codes[0], Q)
+        rep.update(first_codes[0])
 
         all_codes = [first_codes[0]]
 
-        # Codec decode first frame
-        # Prefill codec with context
-        if self.codec_queue is not None:
-            if self.codec_ctx:
-                ctx_codes = torch.stack(self.codec_ctx).T.unsqueeze(0)
-                if n_codebooks > 0:
-                    ctx_codes = ctx_codes[:, :n_codebooks]
-                self.codec_queue.put({"cmd": "prefill", "codes": ctx_codes})
-                resp = self.codec_queue.get(timeout=10)
-                if resp.get("type") != "codec_prefilled":
-                    raise RuntimeError(f"Codec prefill failed: {resp}")
-            else:
-                self.codec_queue.put({"cmd": "reset"})
-                resp = self.codec_queue.get(timeout=10)
-        else:
-            if self.codec_ctx:
-                ctx_codes = torch.stack(self.codec_ctx).T.unsqueeze(0).to("mps")
-                if n_codebooks > 0:
-                    ctx_codes = ctx_codes[:, :n_codebooks]
-                with torch.inference_mode():
-                    self.codec_dec.decode_cached_prefill(ctx_codes)
-            else:
-                self.codec_dec.pre_transformer.reset_cache()
+        # Prefill MLX codec with context
+        self._mlx_codec.reset_state()
+        if self.codec_ctx:
+            ctx_codes_pt = torch.stack(self.codec_ctx).T.unsqueeze(0)
+            if n_codebooks > 0:
+                ctx_codes_pt = ctx_codes_pt[:, :n_codebooks]
+            ctx_mx = mx.array(ctx_codes_pt.numpy().astype(np.int32))
+            self._mlx_codec.prefill(ctx_mx)
+            mx.eval(self._mlx_codec.parameters())
 
         audio = decode_audio_frame(first_codes[0])
         first_frame_ms = (time.perf_counter() - t_first) * 1000
@@ -430,16 +398,12 @@ class MLXTTSEngine:
             cb0_logits = model.codec_head(hidden)
             eos_logit = model.eos_head(hidden)
 
-            penalised = _apply_rep_penalty(
-                cb0_logits, past_codes_per_q[0], rep_penalty, rep_window
-            )
+            penalised = rep.apply_cb0(cb0_logits)
             code0 = _sample_top_k(penalised / temperature, top_k)
 
-            logit_bias = _compute_rq_logit_bias(
-                past_codes_per_q, rep_penalty, rep_window, rq_Q, CS
-            )
+            logit_bias = rep.rq_logit_bias()
             codes_frame = model.rq_transformer.generate(
-                hidden, code0, rq_temp, top_k, logit_bias
+                hidden, code0, rq_temp, top_k, logit_bias, max_q=rq_Q
             )
 
             mx.eval(codes_frame, eos_logit)
@@ -447,7 +411,7 @@ class MLXTTSEngine:
             if step >= min_frames and float(mx.sigmoid(eos_logit).item()) > 0.5:
                 break
 
-            _update_history(past_codes_per_q, codes_frame[0], Q)
+            rep.update(codes_frame[0])
             all_codes.append(codes_frame[0])
             codes_in = codes_frame[0]
 
@@ -554,12 +518,98 @@ class MLXTTSEngine:
             "codes": all_codes,
         }
 
+    # --- Prompt loading ---
+
+    def _load_prompt_by_name(self, name: str, settings: dict | None = None):
+        """Load a voice prompt by name (wav+txt or .pt), encode, and prefill."""
+        settings = settings or {}
+        wav_path = PROMPTS_DIR / f"{name}.wav"
+        txt_path = PROMPTS_DIR / f"{name}.txt"
+
+        if not wav_path.exists():
+            raise FileNotFoundError(f"No prompt wav at {wav_path}")
+
+        # Read audio
+        from torchcodec.decoders import AudioDecoder
+        from julius.resample import resample_frac
+
+        dec = AudioDecoder(str(wav_path), num_channels=1).get_all_samples()
+        audio_16k = resample_frac(dec.data, int(dec.sample_rate), 16000).squeeze(0)
+        audio_24k = resample_frac(audio_16k.unsqueeze(0), 16000, 24000)
+
+        # Transcribe if no .txt
+        if txt_path.exists():
+            text = txt_path.read_text().strip()
+        else:
+            import mlx_whisper
+            text = mlx_whisper.transcribe(
+                audio_16k.numpy(),
+                path_or_hf_repo="mlx-community/whisper-large-v3-turbo",
+                language="en",
+                verbose=False,
+            )["text"].strip()
+            txt_path.write_text(text)
+            print(f"[TTS-MLX] Saved ASR transcript to {txt_path}")
+
+        # Encode audio to codes
+        enc = self._get_codec_enc()
+        device = next(enc.parameters()).device
+        audio_in = audio_24k.float().to(device).unsqueeze(0)
+        with torch.inference_mode():
+            codes = enc.encode(audio_in)
+        codes_tq = codes[0, :self.n_q].T.long().cpu()  # (T, Q)
+
+        # Prefill
+        codes_mx = mx.array(codes_tq.numpy().astype(np.int32))
+        self.reset()
+        self.model.decoder.make_cache()
+
+        # Speaker embedding
+        spk_emb_mx = None
+        if self.model.spk_proj is not None:
+            from vui.qwen_spk_enc import QwenSpeakerEncoder
+            if not hasattr(self, '_spk_enc'):
+                self._spk_enc = QwenSpeakerEncoder.from_pretrained()
+            spk_emb = self._spk_enc.embed(audio_24k.squeeze(0), sr=24000)
+            spk_emb_mx = mx.array(spk_emb.numpy())
+            spk_token = self.model.spk_proj(spk_emb_mx).reshape(1, 1, -1)
+            self.model.decoder(spk_token)
+
+        # Text + codes
+        ids = self.tok.encode(simple_clean(text))
+        ids_mx = mx.array(ids.numpy().astype(np.int32))
+        self.model.decoder(self.model.token_emb(ids_mx[None]))
+        audio_emb = self.model.audio_emb(codes_mx)[None]
+        self.model.decoder(audio_emb)
+        mx.eval([c.state for c in self.model.decoder.kv_caches])
+
+        n_text = ids_mx.shape[0]
+        n_audio = codes_mx.shape[0]
+        self.T = (1 if spk_emb_mx is not None else 0) + n_text + n_audio
+        self.prompt_T = self.T
+        self.prompt_codes = codes_mx
+        self.prompt_text = text
+
+        # Seed codec context
+        self.codec_ctx = [codes_tq[i] for i in range(codes_tq.shape[0])]
+
+        print(f"[TTS-MLX] Loaded prompt '{name}': {text[:60]}... ({n_audio} frames, T={self.T})")
+
     # --- Codec encode ---
 
+    def _get_codec_enc(self):
+        if self.codec_enc is None:
+            print("[TTS-MLX] Loading codec encoder on CPU (lazy)...")
+            from vui.qwen_codec import QwenCodecEncoder
+            self.codec_enc = QwenCodecEncoder.from_pretrained().cpu().float().eval()
+        return self.codec_enc
+
     def encode_full(self, audio_np) -> torch.Tensor | None:
-        audio_t = torch.from_numpy(audio_np).float().to("mps").reshape(1, 1, -1)
+        enc = self._get_codec_enc()
+        device = next(enc.parameters()).device
+        audio_t = torch.from_numpy(audio_np).float().to(device).reshape(1, 1, -1)
         with torch.inference_mode():
-            codes = self.codec_enc.encode(audio_t)
+            codes = enc.encode(audio_t)
         return codes[0, : self.n_q].T.long().cpu()
 
     # --- Conversation debug log ---
@@ -613,36 +663,20 @@ def tts_process_mlx(
 ):
     import multiprocessing
     import signal
+    import threading
 
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
     if cancel_event is None:
         cancel_event = multiprocessing.Event()
 
-    # Spawn codec worker process to avoid GPU contention
-    from vui.serving.stream.codec_worker import codec_process
-
-    codec_cmd_queue = multiprocessing.Queue()
-    codec_audio_queue = multiprocessing.Queue()
-    codec_proc = multiprocessing.Process(
-        target=codec_process,
-        args=(codec_cmd_queue, codec_audio_queue),
-        daemon=False,
-    )
-    codec_proc.start()
-
-    # Wait for codec worker to be ready
     try:
-        resp = codec_audio_queue.get(timeout=30)
-        if resp.get("type") != "ready":
-            raise RuntimeError(f"Codec worker failed to initialize: {resp}")
+        engine = MLXTTSEngine.from_checkpoint(checkpoint_path)
     except Exception as e:
-        print(f"[TTS-MLX] Codec worker init failed: {e}")
-        audio_queue.put({"type": "error", "msg": f"Codec worker init failed: {str(e)}"})
-        codec_proc.terminate()
-        codec_proc.join(timeout=5)
+        import traceback
+        traceback.print_exc()
+        audio_queue.put({"type": "error", "msg": str(e)})
         return
-
-    engine = MLXTTSEngine.from_checkpoint(checkpoint_path, codec_queue=codec_cmd_queue)
     audio_queue.put({"type": "ready"})
 
     debug_dir = Path("debug_dump")
@@ -779,6 +813,22 @@ def tts_process_mlx(
                 traceback.print_exc()
                 audio_queue.put({"type": "error", "msg": str(e)})
 
+        elif cmd == "prefill_user_chunk":
+            final = msg.get("final", False)
+            reply_type = "user_prefilled" if final else "user_chunk_prefilled"
+            try:
+                text = msg.get("text", "")
+                if text:
+                    engine.prefill_user_turn(text=text, settings=msg.get("settings"))
+                audio_queue.put(
+                    {"type": reply_type, "frames": 0, "final": final, "T": engine.T}
+                )
+            except Exception:
+                traceback.print_exc()
+                audio_queue.put(
+                    {"type": reply_type, "frames": 0, "final": final, "T": engine.T}
+                )
+
         elif cmd == "prefill_text_sc":
             try:
                 sc_prob = engine.prefill_text_sc(msg["text"])
@@ -805,15 +855,29 @@ def tts_process_mlx(
             )
 
         elif cmd == "load_kv":
-            audio_queue.put(
-                {
-                    "type": "kv_loaded",
-                    "name": msg.get("file", ""),
-                    "ok": False,
-                    "T": 0,
-                    "text": "",
-                }
-            )
+            try:
+                name = msg.get("name") or msg.get("file", "")
+                engine._load_prompt_by_name(name, msg.get("settings", {}))
+                audio_queue.put(
+                    {
+                        "type": "kv_loaded",
+                        "name": name,
+                        "ok": True,
+                        "T": engine.T,
+                        "text": engine.prompt_text or "",
+                    }
+                )
+            except Exception as e:
+                traceback.print_exc()
+                audio_queue.put(
+                    {
+                        "type": "kv_loaded",
+                        "name": msg.get("file", ""),
+                        "ok": False,
+                        "T": 0,
+                        "text": "",
+                    }
+                )
 
         elif cmd == "cancel":
             print(f"[TTS-MLX] Cancel: T={engine.T}")
@@ -845,37 +909,34 @@ def tts_process_mlx(
             try:
                 if engine.prompt_codes is not None:
                     pc = engine.prompt_codes
-                    if isinstance(pc, mx.array):
-                        pc = torch.from_numpy(np.array(pc))
-                    codes_pt = pc.long().to("mps")
-                    if codes_pt.dim() == 3:
-                        codes_pt = codes_pt.squeeze(0)
-                    codes_pt = codes_pt.T.unsqueeze(0)
-                    with torch.inference_mode():
-                        audio = engine.codec_dec.decode_chunked(
-                            codes_pt, chunk_size=200
-                        )
-                    wav = audio[0, 0].cpu().float()
+                    if isinstance(pc, torch.Tensor):
+                        pc = mx.array(pc.cpu().numpy().astype(np.int32))
+                    # pc: (T, Q) MLX array — decode with MLX codec
+                    engine._mlx_codec.reset_state()
+                    audio_parts = []
+                    for i in range(pc.shape[0]):
+                        frame = pc[i][None, :, None]  # (1, Q, 1)
+                        a = engine._mlx_codec.decode_frame(frame)
+                        mx.eval(a)
+                        audio_parts.append(np.array(a.flatten()))
+                    wav = torch.from_numpy(np.concatenate(audio_parts)).float()
                     audio_queue.put(
                         {
                             "type": "prompt_audio",
                             "audio": wav,
                             "sample_rate": 24000,
-                            "codes_shape": (
-                                list(pc.shape)
-                                if isinstance(pc, mx.array)
-                                else list(pc.shape)
-                            ),
+                            "codes_shape": list(pc.shape),
                         }
                     )
                 else:
                     audio_queue.put({"type": "prompt_audio", "audio": None})
             except Exception:
-                traceback.print_exc()
+                import traceback as _tb
+                _tb.print_exc()
                 audio_queue.put({"type": "prompt_audio", "audio": None})
 
         elif cmd == "stream_start":
-            pass  # Streaming encode not supported in MLX mode yet
+            pass  # User audio encoding skipped on MLX — text-only prefill
 
         elif cmd == "stream_feed":
             pass
@@ -884,12 +945,3 @@ def tts_process_mlx(
             audio_queue.put({"type": "codes_final", "codes": None})
 
     print("[TTS-MLX] Shutting down")
-    # Cleanup codec worker process
-    try:
-        codec_cmd_queue.put({"cmd": "shutdown"}, timeout=1)
-    except Exception:
-        pass
-    codec_proc.terminate()
-    codec_proc.join(timeout=5)
-    if codec_proc.is_alive():
-        codec_proc.kill()
