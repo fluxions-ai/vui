@@ -397,6 +397,7 @@ async def handle_ws(srv: StreamServer, request):
                     "user_audio",
                     "keep_context",
                     "tool_check",
+                    "speculative_reply",
                 ):
                     if key in data:
                         val = bool(data[key])
@@ -408,6 +409,17 @@ async def handle_ws(srv: StreamServer, request):
                     if new_sq != srv.session.settings.get("sq_scores"):
                         changed.append(f"sq_scores={new_sq}")
                     srv.session.settings["sq_scores"] = new_sq
+                # cond_bias (wps_score + sq_scores) is fixed at prompt-prefill
+                # time. To make a slider tweak take effect from the next chunk
+                # onward without rewinding KV, push a `set_cond` to the worker.
+                if any(c.startswith(("wps_score=", "sq_scores=")) for c in changed):
+                    srv.tts_cmd_queue.put(
+                        {
+                            "cmd": "set_cond",
+                            "wps": float(srv.session.settings.get("wps_score") or 0.0),
+                            "sq": srv.session.settings.get("sq_scores"),
+                        }
+                    )
                 if changed:
                     print(f"[settings] {', '.join(changed)}")
                 if "n_codebooks" in data and any("n_codebooks" in c for c in changed):

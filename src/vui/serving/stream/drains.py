@@ -685,6 +685,28 @@ async def drain_asr_results(srv: StreamServer):
                 f"[main.asr] stable_prefix: {stable_words}/{total_words}w "
                 f"end_t={stable_end_time:.3f}s '{stable_text[:50]}'"
             )
+            # Speculative LLM prefill: fire on stable_prefix too so we get
+            # real lead time. line_completed only fires when fwhisper sees
+            # `.!?` in interim text, which often lands at end-of-speech —
+            # too late for speculation. Shares throttle state with the
+            # line_completed branch so we don't double-fire. In
+            # speculative_reply mode the spec task in llm_speculative_prefill
+            # cancels + replaces on each new trigger.
+            now = time.monotonic()
+            grew = len(stable_text) >= len(srv._last_prefill_text or "") + 20
+            if (
+                stable_text
+                and len(stable_text.split()) >= 4
+                and grew
+                and (now - srv._last_prefill_t) > 1.5
+                and stable_text != srv._last_prefill_text
+            ):
+                srv._last_prefill_text = stable_text
+                srv._last_prefill_t = now
+                _spawn(
+                    srv._llm_speculative_prefill(stable_text),
+                    "llm_spec_prefill_stable",
+                )
             # Incremental TTS-KV prefill: when the stable prefix has grown
             # by ≥6 words AND ≥600ms since the last chunk, ship it as
             # `prefill_user_chunk` so the TTS worker can write a partial

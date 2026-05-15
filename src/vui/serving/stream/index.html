@@ -337,6 +337,9 @@ body.viz-only #viz-exit-btn { display: block; }
         <div class="setting" style="display:flex;align-items:center;" title="Run the parallel 'thoughts' LLM that decides whether to invoke memory ops or delegate to the Claude task server.">
             <label><input type="checkbox" id="tool_check" checked> Tool check</label>
         </div>
+        <div class="setting" style="display:flex;align-items:center;" title="On stable ASR partials, stream a full LLM reply in the background. If the committed transcript matches the partial, skip the live LLM call and pump the buffered reply straight into TTS (near-zero LLM TTFB). Burns compute on mismatches.">
+            <label><input type="checkbox" id="speculative_reply"> Speculative reply</label>
+        </div>
     </div>
     <label style="margin-top:8px;display:block;" title="Six conditioning channels (0-5) that bias the model toward audio with these quality characteristics. 0 = disable that channel.">Speech Quality</label>
     <div class="settings-grid" style="margin-top:4px;">
@@ -509,7 +512,7 @@ function applySettings(s) {
             if (num && i < s.sq_scores.length) num.value = s.sq_scores[i];
         });
     }
-    for (const cb of ['user_audio', 'keep_context', 'tool_check']) {
+    for (const cb of ['user_audio', 'keep_context', 'tool_check', 'speculative_reply']) {
         if (cb in s) {
             const el = document.getElementById(cb);
             if (el) el.checked = !!s[cb];
@@ -943,6 +946,9 @@ document.getElementById('keep_context').addEventListener('change', (e) => {
 });
 document.getElementById('tool_check').addEventListener('change', (e) => {
     if (ws && ws.readyState === 1) ws.send(JSON.stringify({type: 'settings', tool_check: e.target.checked}));
+});
+document.getElementById('speculative_reply').addEventListener('change', (e) => {
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({type: 'settings', speculative_reply: e.target.checked}));
 });
 
 const spEl = document.getElementById('soul');

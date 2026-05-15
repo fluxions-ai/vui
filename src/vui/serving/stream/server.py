@@ -256,6 +256,13 @@ DEFAULT_SETTINGS = {
     "vad_stop_secs": 0.3,  # silero silence-to-stop. Lower = snappier.
     "asr_settle_s": 0.12,  # post vad_stop wait for last fwhisper interim.
     "trailing_off_delay": 0.0,  # extra wait when ASR text doesn't end in .?!
+    # When True, on stable ASR partials kick off a full streaming LLM
+    # generation (not just a 1-token prefill). If the committed transcript
+    # matches the partial we generated for, voice_respond skips the LLM
+    # stream and pumps the buffered reply straight into TTS. Burns compute
+    # on speculations that get thrown away, in exchange for near-zero
+    # LLM TTFB on clean utterances.
+    "speculative_reply": False,
 }
 
 
@@ -364,6 +371,16 @@ class StreamServer:
         # serialise on Ollama's KV cache, and waste compute warming a
         # transcript the user has already revised past.
         self._prefill_inflight: bool = False
+        # Speculative full-reply generation. _spec_reply_for_text is the
+        # ASR partial used as input; _spec_reply is the buffered text
+        # streamed back so far; _spec_task is the in-flight asyncio task
+        # so a superseding partial can cancel it cleanly. _spec_reply_done
+        # is set once streaming completes (so consumers know whether the
+        # buffer is final or still growing).
+        self._spec_reply_for_text: str = ""
+        self._spec_reply: str = ""
+        self._spec_reply_done: bool = False
+        self._spec_task: asyncio.Task | None = None
         self._last_transcription: str | None = None
         self._last_codes_final_n = 0
         self._codes_final_event = asyncio.Event()
@@ -727,6 +744,12 @@ class StreamServer:
         self._last_codes_final_n = 0
         self._codes_final_event.clear()
         self._last_prefill_text = ""
+        self._spec_reply_for_text = ""
+        self._spec_reply = ""
+        self._spec_reply_done = False
+        if self._spec_task and not self._spec_task.done():
+            self._spec_task.cancel()
+        self._spec_task = None
         self._user_chunks_prefilled = 0
         self._last_user_chunk_text = ""
         self._last_user_chunk_t = 0.0
