@@ -21,6 +21,22 @@ QWEN_SR = 24000
 PROMPTS_DIR = Path("prompts")
 HF_PROMPTS_REPO = "fluxions/vui"
 HF_PROMPTS_PREFIX = "prompts/"
+PRESET_VOICES = ["maeve", "abraham", "rhian", "harry"]
+
+
+def ensure_preset_prompts() -> list[str]:
+    """Download all preset wav+txt prompts from HF if missing. Returns stems that ended up local."""
+    PROMPTS_DIR.mkdir(exist_ok=True)
+    ready: list[str] = []
+    for stem in PRESET_VOICES:
+        wav = PROMPTS_DIR / f"{stem}.wav"
+        txt = PROMPTS_DIR / f"{stem}.txt"
+        if wav.exists() and txt.exists():
+            ready.append(stem)
+            continue
+        if _fetch_hf_prompt(stem) is not None:
+            ready.append(stem)
+    return ready
 
 
 def _list_hf_prompts() -> list[str]:
@@ -40,21 +56,41 @@ def _list_hf_prompts() -> list[str]:
 
 
 def _fetch_hf_prompt(stem: str) -> Path | None:
-    """Download prompts/{stem}.safetensors from HF into PROMPTS_DIR. Returns local path or None."""
-    try:
-        from huggingface_hub import hf_hub_download
+    """Download a prompt from HF into PROMPTS_DIR. Returns local path or None.
 
+    Prefers `{stem}.wav` + `{stem}.txt` (gives full speaker conditioning via
+    the wav+txt regen path in `load_kv_by_name`). Falls back to
+    `{stem}.safetensors` (codes-only, no spk audio).
+    """
+    import shutil
+
+    from huggingface_hub import hf_hub_download
+
+    PROMPTS_DIR.mkdir(exist_ok=True)
+
+    try:
+        wav_cached = hf_hub_download(HF_PROMPTS_REPO, f"{HF_PROMPTS_PREFIX}{stem}.wav")
+        txt_cached = hf_hub_download(HF_PROMPTS_REPO, f"{HF_PROMPTS_PREFIX}{stem}.txt")
+    except Exception as e:
+        print(f"[prompts] HF wav+txt {stem}: {e}; falling back to safetensors")
+    else:
+        wav_dst = PROMPTS_DIR / f"{stem}.wav"
+        txt_dst = PROMPTS_DIR / f"{stem}.txt"
+        if not wav_dst.exists():
+            shutil.copy(wav_cached, wav_dst)
+        if not txt_dst.exists():
+            shutil.copy(txt_cached, txt_dst)
+        return wav_dst
+
+    try:
         cached = hf_hub_download(
             HF_PROMPTS_REPO, f"{HF_PROMPTS_PREFIX}{stem}.safetensors"
         )
     except Exception as e:
         print(f"[prompts] HF download {stem}: {e}")
         return None
-    PROMPTS_DIR.mkdir(exist_ok=True)
     dst = PROMPTS_DIR / f"{stem}.safetensors"
     if not dst.exists():
-        import shutil
-
         shutil.copy(cached, dst)
     return dst
 

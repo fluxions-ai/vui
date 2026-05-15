@@ -629,6 +629,33 @@ async def warmup(srv: StreamServer):
             or (_srv_mod.PROMPTS_DIR / f"{last}.pt").exists()
             or (_srv_mod.PROMPTS_DIR / f"{last}.safetensors").exists()
         )
+        if not any_src:
+            from vui.serving.stream.prompt_routes import _fetch_hf_prompt
+
+            await srv._log(f"Fetching prompt '{last}' from Hugging Face...")
+            fetched = await asyncio.to_thread(_fetch_hf_prompt, last)
+            any_src = fetched is not None
+            if not any_src:
+                await srv._log(f"Could not fetch prompt '{last}'", "warn")
+
+        async def _fetch_remaining_presets():
+            from vui.serving.stream.prompt_routes import (
+                PRESET_VOICES,
+                ensure_preset_prompts,
+            )
+
+            missing = [
+                s
+                for s in PRESET_VOICES
+                if not (_srv_mod.PROMPTS_DIR / f"{s}.wav").exists()
+            ]
+            if not missing:
+                return
+            ready = await asyncio.to_thread(ensure_preset_prompts)
+            await srv._log(f"Preset voices ready: {', '.join(ready)}")
+
+        _spawn(_fetch_remaining_presets(), "fetch_preset_prompts")
+
         if any_src:
             await srv._log(f"Loading prompt '{last}'...")
             srv.tts_cmd_queue.put({"cmd": "load_kv", "file": last})
