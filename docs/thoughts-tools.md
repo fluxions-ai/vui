@@ -1,6 +1,6 @@
 # The thoughts stream
 
-The **thoughts stream** (`src/vui/serving/stream/thoughts.py`) is a parallel LLM call running on the local Ollama model that already serves the conversation. On every user turn it gets the conversation + memories + current tasks and **must call exactly one tool**. Most turns it picks `no_action` and the conversation LLM speaks normally; otherwise it routes to a memory op, a task op, or `delegate` (hand off to `claude-task`).
+The **thoughts stream** (`src/vui/serving/stream/thoughts.py`) is a parallel LLM call running on the local Ollama model that already serves the conversation. On every user turn it gets the conversation + memories + current tasks and **must call exactly one tool**. Most turns it picks `no_action` and the conversation LLM speaks normally; otherwise it routes to a memory op, a task op, `web_search` (one-shot factual lookup), or `delegate` (hand off to `claude-task` for agentic work).
 
 The soul shapes how the assistant *talks*; the thoughts stream decides what it *does*. Same Ollama model, different prompt, never speaks. Forced to emit exactly one tool call from the registry.
 
@@ -27,17 +27,18 @@ Two performance notes worth knowing if you're tuning latency:
 Adding a tool here is the right move when:
 
 - The action is **fast and local** — a few hundred ms of LLM tool-routing + a sync Python handler beats a 2–10s round-trip through the Claude task server.
-- It needs **no MCP**, no agent loop, no web access — just access to the streaming server's process state.
-- The Ollama model is **smart enough to pick it reliably** from the system prompt (qwen3.5:4b handles 10–12 tools fine; past that, recall drops).
+- It needs **no MCP**, no agent loop — just access to the streaming server's process state. (A one-shot HTTP call to a search API is fine — that's exactly what the built-in `web_search` tool does.)
+- The Ollama model is **smart enough to pick it reliably** from the system prompt (qwen3.5:4b handles the current ~15-tool registry fine in practice; we haven't characterised behaviour past that, so adding many more is the next thing to watch).
 
-Anything that needs live web data, multi-step reasoning, or an MCP integration belongs in `claude-task` via `delegate`. The thoughts stream is for the snappy, deterministic stuff.
+Single-query factual web lookups already have a dedicated `web_search` tool (Serper / Brave / Tavily backends — see `tools/web_search/`). Multi-step reasoning, account access, and MCP integrations belong in `claude-task` via `delegate`. The thoughts stream is for the snappy, deterministic stuff.
 
 ## Latency budget
 
 | Path | Round-trip | Examples |
 |---|---|---|
 | Thoughts tool (local) | ~150–400ms | `add_memory`, `cancel_task`, `clear_context`, "set a timer" |
-| `delegate` → `claude-task` | ~2–10s + filler | "check my emails", "what's the weather" |
+| `web_search` (one HTTP hop) | ~800–1500ms | "what's the weather", "price of X", "who won the match" |
+| `delegate` → `claude-task` | ~2–10s + filler | "check my emails", "summarise my unread Slack DMs", "research X and report back" |
 
 The thoughts call runs **in parallel with the conversation reply**, so for silent tools (memory ops) the user notices nothing — the assistant just speaks its natural acknowledgement and the side-effect happens before the turn ends.
 

@@ -7,6 +7,7 @@ import json
 import pathlib
 import re
 import time
+import uuid
 from typing import TYPE_CHECKING
 
 import httpx
@@ -24,10 +25,19 @@ TASKS_PERSIST_PATH = pathlib.Path.home() / ".vui" / "tasks.json"
 
 def save_tasks(srv: StreamServer) -> None:
     """Write `srv._tasks` to disk so cancelled/finished entries survive a
-    server restart. Best-effort — failures log but don't break the flow."""
+    server restart. Best-effort — failures log but don't break the flow.
+
+    Local rows (tools that surfaced themselves via `TASK`) are skipped — their
+    cancel callbacks can't be restored after restart, so a persisted "running"
+    timer would just be a stale row in the UI.
+    """
     try:
         TASKS_PERSIST_PATH.parent.mkdir(parents=True, exist_ok=True)
-        TASKS_PERSIST_PATH.write_text(json.dumps(srv._tasks))
+        persistable = {
+            tid: info for tid, info in srv._tasks.items()
+            if not info.get("is_local")
+        }
+        TASKS_PERSIST_PATH.write_text(json.dumps(persistable))
     except Exception as e:
         print(f"[tasks] failed to persist: {e}")
 
@@ -51,6 +61,75 @@ def load_tasks() -> dict[str, dict]:
         return {}
 
 
+class LocalTask:
+    """Handle the tool gets through `ctx.task` when its module declares a
+    `TASK` block. It writes through to `srv._tasks` (so the UI sees updates
+    via the existing `task_update` ws plumbing) and owns cancel callbacks
+    that fire when the user cancels via voice or the × button.
+    """
+
+    def __init__(self, srv: StreamServer, task_id: str, tool_name: str):
+        self.srv = srv
+        self.task_id = task_id
+        self.tool_name = tool_name
+        self._cancel_cbs: list = []
+
+    def update(
+        self,
+        *,
+        description: str | None = None,
+        status: str | None = None,
+        result: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        info = self.srv._tasks.get(self.task_id)
+        if info is None:
+            return
+        if description is not None:
+            info["description"] = description[:100]
+        if status is not None:
+            info["status"] = status
+        if result is not None:
+            info["result"] = result
+        if error is not None:
+            info["error"] = error
+        _push_task_update(self.srv, self.task_id)
+
+    def on_cancel(self, cb) -> None:
+        """Register a callback (sync fn or coroutine fn) to run when this
+        task is cancelled. Typically used to cancel an asyncio.Task the tool
+        spawned (e.g. `set_timer`'s pending sleep)."""
+        self._cancel_cbs.append(cb)
+
+    async def fire_cancel(self) -> None:
+        for cb in list(self._cancel_cbs):
+            try:
+                r = cb()
+                if asyncio.iscoroutine(r):
+                    await r
+            except Exception as e:
+                print(f"[tasks] local cancel cb error ({self.tool_name}): {e}")
+
+
+def start_local_task(
+    srv: StreamServer, tool_name: str, description: str = ""
+) -> LocalTask:
+    """Allocate a local task row + LocalTask handle. Called by the thoughts
+    dispatcher right before invoking a tool whose module declares `TASK`."""
+    task_id = f"local-{uuid.uuid4().hex[:12]}"
+    srv._tasks[task_id] = {
+        "description": (description or tool_name)[:100],
+        "status": "running",
+        "created": time.time(),
+        "is_local": True,
+        "tool": tool_name,
+    }
+    local = LocalTask(srv, task_id, tool_name)
+    srv._local_tasks[task_id] = local
+    _push_task_update(srv, task_id)
+    return local
+
+
 def _push_task_update(srv: StreamServer, task_id: str):
     save_tasks(srv)
     info = srv._tasks.get(task_id, {})
@@ -66,6 +145,7 @@ def _push_task_update(srv: StreamServer, task_id: str):
                     "result": info.get("result", ""),
                     "error": info.get("error"),
                     "created": info.get("created", 0),
+                    "is_local": bool(info.get("is_local", False)),
                 }
             )
         )
@@ -230,6 +310,14 @@ def find_task_by_description(
 
 
 async def cancel_task(srv: StreamServer, task_id: str) -> bool:
+    info = srv._tasks.get(task_id)
+    if info and info.get("is_local"):
+        local = srv._local_tasks.get(task_id)
+        if local is not None:
+            await local.fire_cancel()
+        info["status"] = "cancelled"
+        _push_task_update(srv, task_id)
+        return True
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             resp = await client.delete(f"{TASK_SERVER_URL}/task/{task_id}")
@@ -469,6 +557,7 @@ async def delete_task(srv: StreamServer, task_id: str) -> bool:
     if info and info.get("status") == "running":
         await cancel_task(srv, task_id)
     existed = srv._tasks.pop(task_id, None) is not None
+    srv._local_tasks.pop(task_id, None)
     if srv._pending_task_id == task_id:
         srv._pending_task_id = None
     _push_task_removed(srv, task_id)
@@ -514,6 +603,22 @@ async def handle_check_task_voice(srv: StreamServer, description: str):
         await deliver_pending_task_results(srv)
         return
 
+    # Local (in-process) tasks don't live on the task server, so skip the
+    # round-trip — local state IS the source of truth.
+    if local.get("is_local"):
+        if local_status == "running":
+            _relay(srv, f"The {desc} is still running.", desc=desc)
+        elif local_status == "error":
+            _relay(
+                srv,
+                f"The {desc} failed: {local.get('error', 'unknown error')}.",
+                desc=desc,
+            )
+        else:
+            _relay(srv, f"The {desc} is {local_status or 'unknown'}.", desc=desc)
+        await deliver_pending_task_results(srv)
+        return
+
     info = await get_task_status(srv, task_id)
     if not info:
         _relay(
@@ -545,6 +650,9 @@ async def handle_check_task_voice(srv: StreamServer, description: str):
 
 
 async def handle_clear_tasks_voice(srv: StreamServer):
+    for local in list(srv._local_tasks.values()):
+        await local.fire_cancel()
+    srv._local_tasks.clear()
     srv._tasks.clear()
     _push_tasks_cleared(srv)
     srv._pending_task_id = None

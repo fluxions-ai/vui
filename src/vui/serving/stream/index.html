@@ -86,6 +86,8 @@ input[type=file] { display: none; }
 .task-item .task-actions { display: flex; gap: 6px; align-items: center; }
 .task-delete { color: #888; cursor: pointer; padding: 4px 10px; border-radius: 3px; font-size: 1.2em; line-height: 1; user-select: none; }
 .task-delete:hover { color: #f87171; background: #2e0505; }
+.task-show-more { padding: 6px 10px; margin: 4px 0; font-size: 0.75em; color: #888; cursor: pointer; text-align: center; border-radius: 6px; background: #0c0c0c; border: 1px dashed #2a2a2a; user-select: none; }
+.task-show-more:hover { color: #ccc; background: #141414; }
 #voice-orb-host { position: relative; width: 100%; height: 220px; margin-bottom: 12px; }
 #voice-orb { position: absolute; inset: 0; }
 #voice-orb.pinned {
@@ -219,10 +221,6 @@ body.viz-only #viz-exit-btn { display: block; }
         <button class="talk-btn" id="talk-btn" style="flex:1;" disabled title="Press and hold (or hold space) to keep the floor — VAD won't endpoint while held, so a thinking pause won't cut off your turn">Connecting...</button>
         <button class="reset-btn" id="vad-btn" onclick="toggleVAD()" style="padding:16px 12px;font-size:1.1em;min-width:44px;background:#16a34a;" title="Toggle voice activity detection. When off, the mic stops listening entirely">VAD</button>
         <button class="reset-btn" id="listen-btn" onclick="toggleListen()" style="padding:16px 12px;font-size:1.1em;min-width:44px;background:#555;" title="Listen mode — assistant keeps listening but only responds when you address it by name (e.g. 'Vui, what time is it'). Toggle off to chat normally.">&#x1f92b;</button>
-    </div>
-    <div style="display:flex;gap:6px;margin-top:8px;">
-        <input type="text" id="tts-input" placeholder="Type text to speak..." title="Direct TTS — type text and the assistant speaks it verbatim. Bypasses the LLM, doesn't appear in conversation history." style="flex:1;background:#111;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:8px;font-size:0.9em;">
-        <button class="upload-btn" onclick="sendTTS()" style="padding:8px 16px;" title="Synthesise the text on the left and speak it through TTS (no LLM, no ASR)">Speak</button>
     </div>
     <button class="cancel-btn" id="cancel-btn" onclick="cancelGeneration()" style="display:none" title="Cancel the assistant's in-flight response (stops TTS playback and LLM streaming)">Cancel</button>
     <div class="level-bar"><div class="level-bar-fill" id="level-fill"></div></div>
@@ -657,7 +655,10 @@ function onWsMessage(e) {
         console.log('[reset] context_cleared received, clearing conv (had', document.getElementById('conversation').children.length, 'msgs)');
         document.getElementById('conversation').innerHTML = '';
         document.getElementById('chunks').textContent = '';
-        updateConvCtx({conv_ctx: 0, conv_ctx_max: 8192, thoughts_ctx: 0, thoughts_ctx_max: 8192});
+        // A `ctx_status` event follows with the real max values from the
+        // active model — that updates the bars. No hardcoded fallback here.
+    } else if (data.type === 'ctx_status') {
+        updateConvCtx(data);
     } else if (data.type === 'model_changed') {
         refreshOllamaModels();
     } else if (data.type === 'log') {
@@ -882,23 +883,6 @@ document.addEventListener('keyup', (e) => {
 });
 // Safety net: release the floor if the page loses focus.
 window.addEventListener('blur', () => setFloorHold(false));
-
-function sendTTS() {
-    const input = document.getElementById('tts-input');
-    const text = input.value.trim();
-    if (!text) return;
-    if (ws && ws.readyState === 1) {
-        ws.send(JSON.stringify({type: 'tts', text: text}));
-        addMessage('assistant', text);
-        document.getElementById('chunks').textContent = '';
-        document.getElementById('cancel-btn').style.display = '';
-        setStatus('Generating TTS...');
-        input.value = '';
-    }
-}
-document.getElementById('tts-input').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); sendTTS(); }
-});
 
 async function updatePromptText() {
     const input = document.getElementById('prompt-text');
@@ -1280,40 +1264,107 @@ function addLog(text, level) {
 }
 
 const _tasks = {};
+const _expandedTasks = new Set();
+let _tasksShowAll = false;
+const TASKS_VISIBLE_CAP = 10;
+const TASKS_FINISHED_LINGER_SEC = 60;
+
 function updateTask(data) {
-    const {task_id, description, status, result, error, created} = data;
-    _tasks[task_id] = {description, status, result, error, created};
+    const {task_id, description, status, result, error, created, is_local} = data;
+    const prev = _tasks[task_id] || {};
+    const terminal = status && status !== 'running';
+    // Stamp `finished_at` the FIRST time we see this task in a terminal
+    // state — drives the "hide 1 minute after done/cancellation" rule.
+    // Preserve any existing stamp so a redundant task_update doesn't reset
+    // the linger window (e.g. set_timer's _fire updating status=cancelled
+    // right after cancel_task already set it).
+    const finished_at = terminal
+        ? (prev.finished_at || (Date.now() / 1000))
+        : null;
+    _tasks[task_id] = {description, status, result, error, created, is_local: !!is_local, finished_at};
     renderTasks();
+}
+function renderTaskItem(id) {
+    const t = _tasks[id];
+    const st = t.status || 'running';
+    const desc = t.description || id;
+    const hasResult = t.result || t.error;
+    const resultText = t.error ? 'Error: ' + t.error : (t.result || '');
+    const ago = t.created ? timeSince(t.created) : '';
+    // All result panes are click-to-expand. Auto-expanding web search
+    // snippets cluttered the panel; the user can open one when they care.
+    // `_expandedTasks` survives the linger-window re-render interval.
+    const wantExpanded = _expandedTasks.has(id);
+    const expandHint = hasResult ? '<span class="task-expand">click to expand</span>' : '';
+    const itemCls = 'task-item' + (wantExpanded ? ' expanded' : '');
+    return '<div class="' + itemCls + '" id="task-' + id + '" onclick="toggleTaskResult(this)">'
+        + '<div class="task-header">'
+        + '<span class="task-desc">' + esc(desc) + '</span>'
+        + '<span class="task-actions">'
+        + '<span class="task-status ' + st + '">' + st + '</span>'
+        + '<span class="task-delete" title="Delete" onclick="deleteTask(event, \'' + id + '\')">&times;</span>'
+        + '</span>'
+        + '</div>'
+        + (ago ? '<div class="task-time">' + ago + expandHint + '</div>' : '')
+        + (hasResult ? '<div class="task-result">' + esc(resultText) + '</div>' : '')
+        + '</div>';
 }
 function renderTasks() {
     const section = document.getElementById('tasks-section');
     const list = document.getElementById('tasks-list');
     const ids = Object.keys(_tasks);
     if (!ids.length) { section.style.display = 'none'; return; }
-    section.style.display = '';
     ids.sort((a, b) => (_tasks[b].created || 0) - (_tasks[a].created || 0));
-    list.innerHTML = ids.map(id => {
+
+    // Visibility rule:
+    //   - running tasks ALWAYS visible (they're active work)
+    //   - finished tasks linger for TASKS_FINISHED_LINGER_SEC after they
+    //     entered done/cancelled/error, then fold under "Show N older"
+    //   - hard cap of TASKS_VISIBLE_CAP rows backstops a flood of completions
+    const nowSec = Date.now() / 1000;
+    const visible = [];
+    const hidden = [];
+    for (const id of ids) {
         const t = _tasks[id];
-        const st = t.status || 'running';
-        const desc = t.description || id;
-        const hasResult = t.result || t.error;
-        const resultText = t.error ? 'Error: ' + t.error : (t.result || '');
-        const ago = t.created ? timeSince(t.created) : '';
-        const expandHint = hasResult ? '<span class="task-expand">click to expand</span>' : '';
-        return '<div class="task-item" id="task-' + id + '" onclick="toggleTaskResult(this)">'
-            + '<div class="task-header">'
-            + '<span class="task-desc">' + esc(desc) + '</span>'
-            + '<span class="task-actions">'
-            + '<span class="task-status ' + st + '">' + st + '</span>'
-            + '<span class="task-delete" title="Delete" onclick="deleteTask(event, \'' + id + '\')">&times;</span>'
-            + '</span>'
-            + '</div>'
-            + (ago ? '<div class="task-time">' + ago + expandHint + '</div>' : '')
-            + (hasResult ? '<div class="task-result">' + esc(resultText) + '</div>' : '')
+        const running = (t.status || 'running') === 'running';
+        const sinceFinished = t.finished_at ? (nowSec - t.finished_at) : Infinity;
+        if (_tasksShowAll || running) {
+            visible.push(id);
+        } else if (sinceFinished < TASKS_FINISHED_LINGER_SEC && visible.length < TASKS_VISIBLE_CAP) {
+            visible.push(id);
+        } else {
+            hidden.push(id);
+        }
+    }
+
+    // Section visibility: keep the panel shown if there are any rows at all
+    // (even all-hidden, so the "Show N older" toggle is reachable).
+    section.style.display = '';
+    let html = visible.map(renderTaskItem).join('');
+    if (hidden.length) {
+        html += '<div class="task-show-more" onclick="toggleTasksShowAll()">'
+            + (_tasksShowAll ? 'Hide older' : 'Show ' + hidden.length + ' older')
             + '</div>';
-    }).join('');
+    } else if (!visible.length) {
+        // No visible rows and no hidden either — hide the empty section.
+        section.style.display = 'none';
+    }
+    list.innerHTML = html;
 }
-function toggleTaskResult(el) { el.classList.toggle('expanded'); }
+function toggleTasksShowAll() {
+    _tasksShowAll = !_tasksShowAll;
+    renderTasks();
+}
+function toggleTaskResult(el) {
+    const id = el.id.replace(/^task-/, '');
+    if (_expandedTasks.has(id)) _expandedTasks.delete(id);
+    else _expandedTasks.add(id);
+    el.classList.toggle('expanded');
+}
+// Tick every 15s so rows that crossed the 1-minute linger window fall off
+// the visible list without needing a fresh task_update from the server.
+// Bounds worst-case visible-after-finish to 60+15 = 75s.
+setInterval(renderTasks, 15000);
 async function deleteTask(ev, id) {
     if (ev) { ev.stopPropagation(); ev.preventDefault(); }
     try {

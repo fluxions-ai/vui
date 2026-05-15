@@ -87,6 +87,11 @@ class MLXWhisperSession(ASRSession):
         self._worker.start()
         print("[ASR] Stream started (mlx-whisper)")
 
+    # See fwhisper._SILENCE_RMS — mlx-whisper has no vad_filter at all, so
+    # an energy gate is the only thing standing between mic noise and a
+    # Whisper hallucination cascade ("Thank you for watching" / "ciao").
+    _SILENCE_RMS = 0.005
+
     def _transcribe(self, audio: np.ndarray) -> str:
         import mlx_whisper
 
@@ -121,6 +126,11 @@ class MLXWhisperSession(ASRSession):
             start = max(committed_n, len(self._buffer) - self._interim_window_n)
             buf = self._buffer[start:].copy()
         if len(buf) < 16000 * 0.2:
+            return
+        tail_n = min(len(buf), int(0.5 * 16000))
+        tail = buf[-tail_n:]
+        rms = float(np.sqrt(np.mean(tail * tail) + 1e-12))
+        if rms < self._SILENCE_RMS:
             return
         buf_offset_s = start / 16000.0
         word_times = self._transcribe_words(buf)

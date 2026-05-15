@@ -23,11 +23,26 @@ if TYPE_CHECKING:
     from vui.serving.stream.server import StreamServer
 
 
+def _initial_task_desc(args: dict | None) -> str:
+    """Pick a reasonable first-pass description for a local task row from
+    the model's tool args. The tool's `handle()` typically overwrites this
+    with something prettier, but we want the row to land in the UI with
+    *some* content the instant dispatch begins."""
+    if not args:
+        return ""
+    for k in ("subject", "query", "task", "description", "label"):
+        v = args.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
 _LOCAL_CAPABILITIES = [
     "remember things about you",
     "forget specific memories or wipe them all",
     "manage background tasks (list, check on, cancel, delete)",
     "reset our conversation",
+    "look things up on the web (weather, news, prices, scores, definitions)",
 ]
 
 
@@ -54,6 +69,13 @@ no_action (MOST turns):
 CRITICAL — task results already in conversation:
 - If the assistant already told the user the results (emails, weather, calendar, search results etc.) in a message above, then ANY follow-up question about those results is no_action. The conversation LLM can re-read its own messages. Examples: "what was the second email?", "what time was Lisa's meeting?", "which one was from Dave?", "tell me more about the first one". Do NOT use check_task, delegate, or any other tool — use no_action.
 - Only delegate if the user asks for a genuinely NEW external action: "reply to Sarah's email", "check tomorrow's calendar", "do another search".
+
+CRITICAL — assistant is asking the user to clarify, do not act yet:
+- If the assistant's MOST RECENT reply (the one just above [evaluate]) is a clarifying question about what the user actually wants — not a filler/acknowledgement — pick no_action. Wait for the user's clarification next turn, then fire the action then.
+- Clarifying-question signals: "did you mean...", "are you sure...", "X or Y?", "to be clear...", "wait, you want...", any "?" that questions the user's intent rather than offering a follow-up.
+- ACT signals (NOT clarifying — proceed with the tool): short fillers like "yeah hold on", "lemme check", "one sec", "pulling it up". These mean the assistant accepted the request.
+- Applies to ALL state-changing / background-work tools: set_timer, delegate, web_search, add_memory, remove_memory, clear_context, clear_memories, set_speech_rate. Read-only tools (answer_capability, list_tasks, check_task) are fine either way.
+- Example: User: "Set a timer for the pasta app in five minutes." Assistant: "Did you mean the cooking app, or are you actually cooking?" -> no_action. Next turn, after user clarifies, set_timer fires normally.
 
 RULES — read carefully:
 
@@ -93,6 +115,10 @@ class ThoughtsStream:
         self._last_prefill_text: str = ""
         self._last_prefill_t: float = 0.0
         self._prefill_inflight: bool = False
+        # Currently-dispatching tool's local task row (None for tools that
+        # don't declare a TASK block). Tool authors read this as `ctx.task`
+        # and call `task.update(...)` to push UI state.
+        self.task = None
 
     @property
     def conversation(self) -> list[dict]:
@@ -117,10 +143,19 @@ class ThoughtsStream:
         tasks = getattr(self.srv, "_tasks", {})
         if not tasks:
             return None
+        # Only [running] and [done] tasks gate duplicate detection — a
+        # [cancelled] or [error] row is dead work and must NOT shadow a new
+        # request that fuzzy-matches its description (e.g. user cancels
+        # "pasta timer", then asks for a fresh 20s pasta timer — without
+        # this filter the evaluator sees the stale cancelled row and picks
+        # no_action). Cancellation outcomes still live in the conversation
+        # history, so the model can still answer "did you cancel that?".
         task_lines = []
         for info in tasks.values():
-            desc = info.get("description", "unknown")
             status = info.get("status", "unknown")
+            if status not in ("running", "done"):
+                continue
+            desc = info.get("description", "unknown")
             line = f"- [{status}] {desc}"
             # For [done] tasks, append a short result excerpt so the
             # evaluator can answer follow-ups from cached data instead
@@ -133,11 +168,9 @@ class ThoughtsStream:
                 if result:
                     excerpt = result.replace("\n", " ")[:300]
                     line += f"\n    result: {excerpt}"
-            elif status == "error":
-                err = (info.get("error") or "").strip()
-                if err:
-                    line += f"\n    error: {err[:200]}"
             task_lines.append(line)
+        if not task_lines:
+            return None
         return _TASKS_CONTEXT.format(tasks="\n".join(task_lines))
 
     async def speculative_prefill(self, partial_text: str):
@@ -242,6 +275,23 @@ class ThoughtsStream:
             args_preview = json.dumps(args)[:80] if args else ""
             _slog(f"[thoughts] {name}({args_preview}) ({elapsed_ms:.0f}ms)")
             await self.srv._log(f"tool: {name}({args_preview})", "info")
+
+            # If this tool opted into a UI task row via `TASK = {...}`, create
+            # the row before dispatch so the panel reflects work-in-progress.
+            # `ctx.task` is the LocalTask handle; tools that don't declare
+            # TASK see `ctx.task is None`.
+            meta = tools_registry.task_meta(name)
+            local_task = None
+            if meta and meta.get("surface", True):
+                from vui.serving.stream.tasks import start_local_task
+
+                initial_desc = _initial_task_desc(args)
+                local_task = start_local_task(
+                    self.srv, name, initial_desc or name
+                )
+            self.task = local_task
+
+            auto_done = bool(meta.get("auto_done", True)) if meta else False
             try:
                 await handle(self, **(args or {}))
             except TypeError as e:
@@ -249,6 +299,19 @@ class ThoughtsStream:
                 # doesn't accept. Surface clearly so authors fix the schema.
                 _slog(f"[thoughts] tool {name} arg mismatch: {e}")
                 await self.srv._log(f"tool {name} arg mismatch: {e}", "error")
+                if local_task:
+                    local_task.update(status="error", error=str(e))
+            except Exception as e:
+                if local_task:
+                    local_task.update(status="error", error=str(e))
+                raise
+            else:
+                if local_task and auto_done:
+                    info = self.srv._tasks.get(local_task.task_id, {})
+                    if info.get("status") == "running":
+                        local_task.update(status="done")
+            finally:
+                self.task = None
 
         except asyncio.CancelledError:
             return

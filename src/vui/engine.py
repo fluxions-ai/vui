@@ -6,7 +6,7 @@ multi-conversation inference.
 
 Usage (streaming, B=1):
 
-    engine = Engine.from_checkpoint("vui-nano.safetensors")
+    engine = Engine()  # loads "vui-nano" from HuggingFace by default
     with engine.new_row() as row:
         row.prefill([Segment(prompt_text, prompt_codes)], spk_emb=emb)
         for audio in row.stream("Hello!", GenConfig(temperature=0.9)):
@@ -14,7 +14,7 @@ Usage (streaming, B=1):
 
 Usage (batched, B=N):
 
-    engine = Engine.from_checkpoint("vui-nano.safetensors", max_rows=4)
+    engine = Engine(max_rows=4)
     rows = [engine.new_row() for _ in range(4)]
     for r in rows:
         r.prefill([Segment(prompt_text, prompt_codes)])
@@ -281,17 +281,34 @@ class Engine:
     One flash KV cache sized at `max_rows`, one batched backbone decode graph,
     one per-row RQ decode (B=1 looped for correctness), vocoder CUDA graph
     for per-frame streaming decode.
+
+    `Engine()` with no args loads `vui-nano` from HuggingFace. Pass a name
+    (resolved via `Engine.NAMES`), a HF filename, or a local path. Advanced
+    callers can inject `model=` / `codec=` directly to bypass loading.
     """
+
+    NAMES = {
+        "vui-nano": "vui-nano.safetensors",
+    }
 
     def __init__(
         self,
-        model: Vui,
-        codec: QwenCodecDecoder,
+        name: str = "vui-nano",
         *,
+        model: Vui | None = None,
+        codec: QwenCodecDecoder | None = None,
         max_rows: int = 1,
         max_seq: int | None = None,
+        codec_dtype: torch.dtype = torch.float32,
         vocoder_ctx: int = 25,
     ):
+        if model is None:
+            path = self.NAMES.get(name, name)
+            print(f"[Engine] Loading model {path} ...")
+            model = Vui.from_pretrained_inf(path).cuda()
+        if codec is None:
+            print(f"[Engine] Loading codec (dtype={codec_dtype}) ...")
+            codec = QwenCodecDecoder.from_pretrained().cuda().to(codec_dtype).eval()
         self.model = model
         self.codec = codec
         self.max_rows = max_rows
@@ -342,16 +359,12 @@ class Engine:
         codec_dtype: torch.dtype = torch.float32,
         vocoder_ctx: int = 25,
     ) -> "Engine":
-        """Load a Vui checkpoint + Qwen codec and build an Engine."""
-        print(f"[Engine] Loading model {checkpoint_path} ...")
-        model = Vui.from_pretrained_inf(checkpoint_path).cuda()
-        print(f"[Engine] Loading codec (dtype={codec_dtype}) ...")
-        codec = QwenCodecDecoder.from_pretrained().cuda().to(codec_dtype).eval()
+        """Backward-compat shim. Prefer `Engine(name)` / `Engine()`."""
         return cls(
-            model,
-            codec,
+            checkpoint_path,
             max_rows=max_rows,
             max_seq=max_seq,
+            codec_dtype=codec_dtype,
             vocoder_ctx=vocoder_ctx,
         )
 
@@ -622,6 +635,18 @@ class Engine:
         self._rows.pop(row.idx, None)
         self._free.add(row.idx)
         row._codec_ctx.reset()
+
+    def reset(self) -> None:
+        """Release all rows and zero the flash KV seq_lens.
+
+        Use when switching speakers: per-conversation state (KV contents,
+        codec rolling context, speaker tokens) becomes invalid, but the
+        engine's graphs, model weights, and codec stay valid.
+        """
+        for row in list(self._rows.values()):
+            row.close()
+        with torch.inference_mode():
+            self.model.decoder.flash_kv_caches[0].seq_lens.zero_()
 
     def _rewind_row(self, row: Row, offset: int) -> int:
         with torch.inference_mode():

@@ -368,9 +368,13 @@ class StreamServer:
         self._last_user_chunk_text: str = ""
         self._last_user_chunk_t: float = 0.0
 
-        from vui.serving.stream.tasks import load_tasks
+        from vui.serving.stream.tasks import LocalTask, load_tasks
 
         self._tasks: dict[str, dict] = load_tasks()
+        # In-process cancel-callback registry for tasks tools surfaced via
+        # their `TASK` block (e.g. set_timer). Not persisted — running rows
+        # get reclassified to "cancelled" on next boot by `load_tasks`.
+        self._local_tasks: dict[str, LocalTask] = {}
         self._pending_task_id: str | None = None
         self._thoughts_stop_llm = False
         self._pending_task_results: list[dict] = []
@@ -443,6 +447,7 @@ class StreamServer:
         self._test_gen_info: dict | None = None
 
         self._memories_store: list[dict] = memories.load_memories()
+        memories.seed_geo_memory(self._memories_store)
         self._memories: list[str] = memories.memories_to_strings(self._memories_store)
 
         from vui.serving.stream.thoughts import ThoughtsStream
@@ -679,6 +684,7 @@ class StreamServer:
             except Exception:
                 pass
         self._tasks.clear()
+        self._local_tasks.clear()
         try:
             async with httpx.AsyncClient(timeout=2) as client:
                 await client.post(f"{TASK_SERVER_URL}/session/clear")
@@ -688,6 +694,15 @@ class StreamServer:
         if ws and not ws.closed:
             try:
                 await ws.send_json({"type": "context_cleared"})
+                await ws.send_json(
+                    {
+                        "type": "ctx_status",
+                        "conv_ctx": self.conv_ctx,
+                        "conv_ctx_max": self.conv_ctx_max,
+                        "thoughts_ctx": self.thoughts_ctx,
+                        "thoughts_ctx_max": self.thoughts_ctx_max,
+                    }
+                )
             except Exception:
                 pass
 

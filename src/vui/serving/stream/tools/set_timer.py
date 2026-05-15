@@ -44,10 +44,20 @@ set_timer: user says "set a timer for X", "remind me in X minutes", "X minute ti
 """
 
 
+# Show the timer as a task row so the user can see it counting + cancel it
+# via the × button. `auto_done=False` because the row should stay "running"
+# until `_fire` completes — the dispatcher would otherwise mark it done
+# immediately when `handle()` returns.
+TASK = {"surface": True, "auto_done": False}
+
+
 async def handle(ctx: "ThoughtsStream", **args) -> None:
     seconds = int(args.get("seconds", 0) or 0)
     subject = (args.get("subject") or args.get("label") or "").strip()
+    task = ctx.task
     if seconds <= 0:
+        if task:
+            task.update(status="error", error="invalid duration")
         return
     if not subject:
         subject = "reminder"
@@ -56,8 +66,20 @@ async def handle(ctx: "ThoughtsStream", **args) -> None:
     desc = "timer" if subject.lower() == "timer" else f"{subject} timer"
     _slog(f"[set_timer] {desc} for {seconds}s")
 
+    if task:
+        task.update(description=f"{desc} ({seconds}s)")
+
     async def _fire():
-        await asyncio.sleep(seconds)
+        try:
+            await asyncio.sleep(seconds)
+        except asyncio.CancelledError:
+            if task:
+                task.update(status="cancelled")
+            raise
+        if task:
+            task.update(status="done", result=f"{desc} fired after {seconds}s")
         await ctx._speak(f"Your {desc} is up.")
 
-    _spawn(_fire(), f"timer_{desc}")
+    fire_task = _spawn(_fire(), f"timer_{desc}")
+    if task:
+        task.on_cancel(lambda: fire_task.cancel())

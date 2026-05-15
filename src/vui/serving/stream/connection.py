@@ -230,6 +230,15 @@ async def handle_ws(srv: StreamServer, request):
         {"type": "task_server_status", "available": srv._task_server_available}
     )
     await ws.send_json({"type": "llm_status", "available": srv._llm_available})
+    await ws.send_json(
+        {
+            "type": "ctx_status",
+            "conv_ctx": srv.conv_ctx,
+            "conv_ctx_max": srv.conv_ctx_max,
+            "thoughts_ctx": srv.thoughts_ctx,
+            "thoughts_ctx_max": srv.thoughts_ctx_max,
+        }
+    )
     await srv._send_worker_status()
 
     from vui.serving.stream.tasks import push_all_tasks

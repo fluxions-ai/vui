@@ -1,7 +1,10 @@
 """Background task server for voice assistant.
 
-Tasks run asynchronously (Claude, web search, etc). When complete,
-results are pushed to the voice server via callback so TTS can speak them.
+Runs multi-step Claude agent tasks (mail/calendar/Slack reads, file ops,
+deeper research) asynchronously. When complete, results are pushed to the
+voice server via callback so TTS can speak them. One-shot factual web
+lookups don't come through here — the streaming server's local `web_search`
+tool handles those.
 
 Endpoints:
     POST   /task          - Create and run a background task
@@ -120,7 +123,11 @@ def _capability_groups(tools: list[str]) -> list[str]:
     if any("__Google_Drive__" in t for t in tools):
         groups.append("Google Drive")
     if "WebSearch" in tools or "WebFetch" in tools:
-        groups.append("web search")
+        # Labelled as "research" rather than "web search" so the thoughts
+        # stream doesn't route single-query factual lookups here — those go
+        # to the streaming server's local `web_search` tool. claude-task is
+        # for multi-step / chained-call investigations.
+        groups.append("multi-step web research")
     if "Bash" in tools or "Read" in tools:
         groups.append("code execution")
     return groups

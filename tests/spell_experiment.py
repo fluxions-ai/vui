@@ -65,7 +65,7 @@ def main() -> None:
     print(f"Prompt: '{prompt_text[:60]}' ({prompt_codes.shape[0]} frames)")
 
     print("Building engine...")
-    engine = Engine(model, codec_dec, max_rows=1, vocoder_ctx=25)
+    engine = Engine(model=model, codec=codec_dec, max_rows=1, vocoder_ctx=25)
     with engine.new_row() as row:
         row.render("Warmup.", GenConfig(max_secs=2, temperature=0.7))
 

@@ -4,7 +4,6 @@ Auto-detects platform: uses MLX on Apple Silicon, CUDA elsewhere.
 
 Usage:
     python demo.py [checkpoint]                    # Gradio web UI
-    python demo.py --render [checkpoint]           # Interactive CLI
     python demo.py --render [checkpoint] "text"    # Render text and exit
 """
 
@@ -35,7 +34,7 @@ _parser.add_argument(
     "--text", "-t", nargs="+", help="Text to render (non-interactive mode)"
 )
 _parser.add_argument(
-    "--prompt", "-p", default="prompts/good_prompt3.wav", help="Voice prompt wav file"
+    "--prompt", "-p", default="prompts/harry.wav", help="Voice prompt wav file"
 )
 _parser.add_argument(
     "--temperature", type=float, default=None, help="Sampling temperature"
@@ -671,6 +670,18 @@ def invalidate_kv():
     # call creates a fresh Row so the cache is rewritten in place anyway.
 
 
+def _reset_for_new_voice():
+    """Speaker swap invalidates KV contents + codec rolling context."""
+    invalidate_kv()
+    if _engine is not None:
+        _engine.reset()
+    if USE_MLX:
+        try:
+            model.decoder.reset_cache()
+        except Exception:
+            pass
+
+
 CODEC_CTX_FRAMES = 6  # ~500ms at 12.5Hz — minimum decode context
 
 from vui.serving.stream import prompts as _vui_prompts
@@ -720,7 +731,7 @@ else:
     from vui.engine import Engine, GenConfig, Segment
 
     print("Building Engine (manual CUDA graphs + vocoder graph)...")
-    _engine = Engine(model, _get_codec_dec(), max_rows=1, vocoder_ctx=25)
+    _engine = Engine(model=model, codec=_get_codec_dec(), max_rows=1, vocoder_ctx=25)
     print("Warmup...")
     with _engine.new_row() as _warm_row:
         _warm_row.render(
@@ -737,6 +748,27 @@ print("Ready!")
 KNOWN_CHECKPOINTS = [
     "vui-nano.safetensors",
 ]
+
+PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+
+def _list_default_prompts() -> list[str]:
+    if not PROMPTS_DIR.exists():
+        return []
+    return sorted(p.stem for p in PROMPTS_DIR.glob("*.wav"))
+
+
+def _load_default_prompt(stem: str):
+    if not stem:
+        return None
+    wav_path = PROMPTS_DIR / f"{stem}.wav"
+    if not wav_path.exists():
+        return None
+    from torchcodec.decoders import AudioDecoder
+
+    wav = AudioDecoder(str(wav_path), num_channels=1).get_all_samples()
+    return (int(wav.sample_rate), wav.data.squeeze(0).numpy())
+
 
 SAMPLE_TEXTS_PATH = Path(__file__).parent / "sample_texts.json"
 
@@ -1074,7 +1106,7 @@ def load_new_checkpoint(ckpt_path):
                     f"Checkpoint {path} has no RQ-Transformer head; the "
                     "legacy STFT codec path has been removed."
                 )
-            _engine = Engine(model, _get_codec_dec(), max_rows=1, vocoder_ctx=25)
+            _engine = Engine(model=model, codec=_get_codec_dec(), max_rows=1, vocoder_ctx=25)
             with _engine.new_row() as _wr:
                 _wr.render("Warmup.", GenConfig(max_secs=2, temperature=0.7))
 
@@ -1164,8 +1196,14 @@ document.addEventListener('DOMContentLoaded', function() {
                         scale=1,
                     )
 
+            default_prompt_dropdown = gr.Dropdown(
+                choices=_list_default_prompts(),
+                value=None,
+                label="Voice",
+                allow_custom_value=False,
+            )
             audio_input = gr.Audio(
-                label="Voice Prompt (up to 3min)",
+                show_label=False,
                 type="numpy",
                 format="wav",
             )
@@ -1178,7 +1216,7 @@ document.addEventListener('DOMContentLoaded', function() {
             )
 
             text_input = gr.Textbox(
-                label="Text",
+                show_label=False,
                 placeholder="Enter text...\nNewlines create separate turns.",
                 lines=6,
                 max_lines=12,
@@ -1187,7 +1225,7 @@ document.addEventListener('DOMContentLoaded', function() {
             with gr.Row():
                 sample_dropdown = gr.Dropdown(
                     choices=list(load_sample_texts().keys()),
-                    label=f"Sample texts ({SAMPLE_TEXTS_PATH.name})",
+                    label="Sample",
                     value=None,
                     scale=10,
                 )
@@ -1299,8 +1337,8 @@ document.addEventListener('DOMContentLoaded', function() {
                         return "MLX: ignored (CUDA-only)"
                     try:
                         _engine = Engine(
-                            model,
-                            _get_codec_dec(),
+                            model=model,
+                            codec=_get_codec_dec(),
                             max_rows=1,
                             vocoder_ctx=25,
                         )
@@ -1321,10 +1359,8 @@ document.addEventListener('DOMContentLoaded', function() {
             generate_btn = gr.Button("Generate", variant="primary", size="lg")
 
         with gr.Column(scale=1):
-            audio_output = gr.Audio(
-                label="Generated Speech", type="numpy", autoplay=True
-            )
-            info_output = gr.Textbox(label="Info", lines=2, interactive=False)
+            audio_output = gr.Audio(show_label=False, type="numpy", autoplay=True)
+            info_output = gr.Textbox(show_label=False, lines=2, interactive=False)
 
     load_btn.click(fn=load_new_checkpoint, inputs=ckpt_input, outputs=ckpt_status)
 
@@ -1360,7 +1396,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 model = Vui.from_pretrained_inf(checkpoint_path).cuda()
                 if precision != "bfloat16":
                     _quantize_cuda_model(model, precision)
-                _engine = Engine(model, _get_codec_dec(), max_rows=1, vocoder_ctx=25)
+                _engine = Engine(model=model, codec=_get_codec_dec(), max_rows=1, vocoder_ctx=25)
                 with _engine.new_row() as _wr:
                     _wr.render("Warmup.", GenConfig(max_secs=2, temperature=0.7))
                 return f"Switched to {precision}"
@@ -1409,7 +1445,11 @@ document.addEventListener('DOMContentLoaded', function() {
             _prompt_cache.update(
                 hash=None, segments=None, baseline_texts=None, spk_emb=None
             )
+            _reset_for_new_voice()
             return gr.update(visible=False, value="")
+        new_hash = _audio_hash(audio)
+        if new_hash != _prompt_cache.get("hash"):
+            _reset_for_new_voice()
         get_prompt(audio)
         segs = _prompt_cache.get("segments")
         if not segs:
@@ -1417,6 +1457,16 @@ document.addEventListener('DOMContentLoaded', function() {
         return gr.update(visible=True, value=_segments_to_text(segs))
 
     audio_input.change(fn=_prepare_prompt_1, inputs=audio_input, outputs=prompt_text_1)
+
+    default_prompt_dropdown.change(
+        fn=_load_default_prompt,
+        inputs=default_prompt_dropdown,
+        outputs=audio_input,
+    ).then(
+        fn=_prepare_prompt_1,
+        inputs=audio_input,
+        outputs=prompt_text_1,
+    )
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", share=True)

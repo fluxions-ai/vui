@@ -119,6 +119,13 @@ class FWhisperSession(ASRSession):
         "Umm, like, you know, uh, hmm, yeah, so, well, I mean, right, ah."
     )
 
+    # RMS gate applied *before* silero VAD. Silero is supposed to drop
+    # silence, but in practice mic noise floor leaks through and Whisper
+    # cheerfully hallucinates "Thank you for watching" / "Hmm." / "ciao"
+    # on it. At -46 dBFS we're well below any plausible speech (-30 dBFS
+    # quiet, -20 normal) but above a quiet room noise floor (~-55 dBFS).
+    _SILENCE_RMS = 0.005
+
     def _transcribe(self, audio: np.ndarray, beam: int) -> str:
         # vad_filter=True drops silent regions before whisper sees them, which
         # prevents the well-known "Thank you for watching" hallucination on
@@ -164,6 +171,15 @@ class FWhisperSession(ASRSession):
             start = max(committed_n, len(self._buffer) - self._interim_window_n)
             buf = self._buffer[start:].copy()
         if len(buf) < 16000 * 0.2:
+            return
+        # Gate: only look at the trailing uncommitted tail. If that's
+        # silence, there's no new speech to transcribe — return without
+        # touching Whisper. (Don't gate on the whole buf because committed
+        # context may be loud while the new audio is silent.)
+        tail_n = min(len(buf), int(0.5 * 16000))
+        tail = buf[-tail_n:]
+        rms = float(np.sqrt(np.mean(tail * tail) + 1e-12))
+        if rms < self._SILENCE_RMS:
             return
         buf_offset_s = start / 16000.0
         try:

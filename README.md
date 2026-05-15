@@ -30,8 +30,9 @@ Vui is a real-time voice assistant: speak into your mic, the model transcribes, 
 - **Pluggable ASR** — faster-whisper (GPU) or Moonshine (CPU streaming, ONNX)
 - **Pluggable LLM backends** — Ollama, vLLM, any OpenAI-compatible endpoint
 - **Memories** — assistant remembers facts about you across sessions (persisted to `~/.vui/memories.json`)
-- **Thoughts stream** — parallel LLM routes voice intent to ~10 tools (memory ops, task control, delegation) without a wake-word grammar; pluggable for your own local tools
-- **Optional Claude task server** — sidecar agent that handles slow/agentic work (Gmail, Calendar, Drive, Slack, web search) via your existing Claude Code MCPs; auto-discovered on boot
+- **Thoughts stream** — parallel LLM routes voice intent to ~15 tools (memory ops, task control, timers, web search, delegation) without a wake-word grammar; pluggable for your own local tools
+- **Built-in web search** — single-query factual lookups ("weather in London", "price of X", "who won the match") via Serper, Brave, or Tavily — one API round-trip, no agent loop; falls through to `delegate` for multi-step research
+- **Optional Claude task server** — sidecar agent that handles slow/agentic work (Gmail, Calendar, Drive, Slack, multi-step web research) via your existing Claude Code MCPs; auto-discovered on boot
 - **Non-Anthropic task backends** — point the task server at Ollama, z.ai, DeepSeek, vLLM, LM Studio, LiteLLM via the Anthropic-compatible `/v1/messages` envelope
 - **Apple Silicon support** — MLX backend (WIP)
 - **Mobile-ready** — documented cloudflared and Tailscale paths for phone access with mic over HTTPS
@@ -159,7 +160,7 @@ The demo's *Advanced* panel exposes two conditioning vectors that bias generatio
   - **NISQA Disc.** — discontinuity / glitch artifacts (5 = smooth)
   - **NISQA Color.** — spectral colouration (5 = neutral timbre)
   - **NISQA Loudness** — volume level
-- **WPS — words per second** (`0–6`, typical conversational range ~2–4). Speaking-rate target. Useful when a prompt is making the model rush or drag; leave at `0` to let it follow the prompt's natural pace (estimated from the prompt's word count and frame length, see `engine.py:749-754`).
+- **WPS — words per second** (`0–6`, typical conversational range ~2–4). Speaking-rate target. Useful when a prompt is making the model rush or drag; leave at `0` to let it follow the prompt's natural pace (estimated from the prompt's word count and frame length, see `engine.py:771-773`).
 
 Defaults `sq = (0, 0, 0, 0, 0, 5)` and `wps = 0` — only **loudness** is conditioned (pinned to 5), the other five channels are disabled. This gives the most consistent output in practice. To bias toward cleaner audio (at the cost of some liveliness), push the first five channels up toward 5; to mimic phone / lo-fi / noisy recordings, set them to **low non-zero values (~1–2)** — setting them to `0` doesn't make output lo-fi, it just turns the channel off (the `sq_proj` is a bias-free linear layer, so 0 → no contribution).
 
@@ -225,19 +226,22 @@ Why a different name? Because "system prompt" is correct but joyless. The soul i
 
 ## Voice controls
 
-You don't need a wake-word grammar — the **thoughts stream** (`src/vui/serving/stream/thoughts.py`) is a parallel LLM that watches every turn and picks one of ~10 tools by intent. The conversation reply happens in parallel, so memory ops and task control feel near-instant; delegation cancels the in-flight reply and hands off to `claude-task`. Want to add your own local tool (e.g. timers, smart-home toggles) instead of routing it through `claude-task`? See [`docs/thoughts-tools.md`](docs/thoughts-tools.md).
+You don't need a wake-word grammar — the **thoughts stream** (`src/vui/serving/stream/thoughts.py`) is a parallel LLM that watches every turn and picks one of ~15 tools by intent. The conversation reply happens in parallel, so memory ops and task control feel near-instant; delegation cancels the in-flight reply and hands off to `claude-task`. Want to add your own local tool (e.g. timers, smart-home toggles) instead of routing it through `claude-task`? See [`docs/thoughts-tools.md`](docs/thoughts-tools.md).
 
 | Intent | Say something like… | What happens |
 |---|---|---|
 | **Save a memory** | "remember I'm allergic to nuts", "my daughter's name is Lily" | `add_memory` — durable facts only (name, job, family, prefs); transient stuff like "I'm tired today" is ignored. Updates an existing memory if it covers the same topic. |
 | **Forget a memory** | "forget I have a dog", "you can drop the bit about my old job" | `remove_memory` — fuzzy-matched on content. |
 | **Wipe all memories** | "clear all memories", "wipe everything you know about me" | `clear_memories`. |
-| **Delegate a task** | "check my unread emails", "what's on my calendar tomorrow?", "search the web for X" | `delegate` — fires off to `claude-task`, plays filler ("yeah, let me check…"), speaks the result when done. |
+| **Look something up on the web** | "search the web for X", "what's the weather in Tokyo", "price of GBP/USD", "who won the match" | `web_search` — single-query fetch via Serper / Brave / Tavily (whichever has a key set). One round-trip, no `claude-task` needed. Surfaces as a UI task row with the query + result snippet so you can re-read it after the spoken reply. Set `SERPER_API_KEY`, `BRAVE_API_KEY`, or `TAVILY_API_KEY`; pick a provider explicitly with `VUI_SEARCH_PROVIDER=serper\|brave\|tavily`. |
+| **Delegate a task** | "check my unread emails", "what's on my calendar tomorrow?", "do some research on X and summarise" | `delegate` — fires off to `claude-task`, plays filler ("yeah, let me check…"), speaks the result when done. |
 | **List tasks** | "what tasks are running?", "show my tasks" | `list_tasks` — reads them out. |
 | **Check one task** | "is that done yet?", "tell me what you found again" | `check_task` — re-speaks the cached result, no re-run. |
 | **Cancel a task** | "cancel that", "stop the email search", "never mind it" | `cancel_task` — leaves the entry visible as `cancelled`. |
 | **Delete a task** | "delete that one", "get rid of the search task" | `delete_task` — cancels if running, then removes from the list. |
 | **Clear all tasks** | "clear all tasks", "wipe my tasks" | `clear_tasks`. |
+| **Set a timer** | "set a timer for five minutes", "remind me in 30 seconds", "pasta timer for nine minutes" | `set_timer` — countdown shows up as a UI task row with the × cancel affordance; speaks an announcement when it fires. Unit conversion (min → s) happens in the router. |
+| **Change speaking rate** | "talk faster", "slow down a bit", "back to normal speed", "speak at three words a second" | `set_speech_rate` — nudges `wps_score` up/down by a half step, resets to natural pace, or pins an absolute words-per-second value. Slider in the UI moves to match. |
 | **Reset conversation** | "let's start over", "clear the conversation" | `clear_context` — drops history, keeps memories. |
 
 Memories are loaded from `~/.vui/memories.json` on startup and rewritten on every add/remove, so they survive restarts. Tasks live in-memory on the streaming server only — they're not persisted, so a `vui-stream` restart starts you with an empty task list. Trigger phrases are intent-based, not literal — "make a note that…" works as well as "remember…", and ASR errors are tolerated ("male" → "email").
@@ -268,9 +272,9 @@ If you need a checkpoint tuned to a specific voice for a legitimate use case (au
 ```python
 from vui.engine import Engine, GenConfig
 
-engine = Engine.from_checkpoint("vui.pt")
+engine = Engine()  # loads "vui-nano" from HuggingFace by default
 with engine.new_row() as row:
-    audio = row.render(
+    codes, audio = row.render(
         "So [breath] the thing about this is, it's not what you'd expect, right?",
         GenConfig(temperature=0.7),
     )
@@ -288,7 +292,7 @@ Streaming server and `demo.py` both run on either:
 
 Full breakdown — measured per-component VRAM, ASR latency/VRAM per backend, KV-cache math, and tuning levers — is in [`docs/memory-budget.md`](docs/memory-budget.md).
 
-**Tip: drop `n_codebooks` for faster TTS on smaller GPUs.** The RQ-Transformer head decodes 16 RVQ codebook levels per audio frame by default. Dropping the **Codebooks** slider in the UI (or `n_codebooks` in `DEFAULT_SETTINGS`, server.py:228) to **~10** gives noticeably faster decode and lower VRAM at the cost of some stability — occasional artefacts, more sensitivity to hard prompts. Below 8 quality drops sharply. `0` means "use all 16".
+**Tip: drop `n_codebooks` for faster TTS on smaller GPUs.** The RQ-Transformer head decodes 16 RVQ codebook levels per audio frame by default. Dropping the **Codebooks** slider in the UI (or `n_codebooks` in `DEFAULT_SETTINGS`, server.py:232) to **~10** gives noticeably faster decode and lower VRAM at the cost of some stability — occasional artefacts, more sensitivity to hard prompts. Below 8 quality drops sharply. `0` means "use all 16".
 
 
 ## Responsible use
@@ -309,7 +313,7 @@ We are **not responsible** for misuse, and we strongly condemn unethical applica
 
 ## Telemetry
 
-Vui sends an anonymous event each time it renders audio so we can see which preset voices people use and roughly how much speech the model produces in the wild. **What's sent**: `{voice, seconds}` plus `app: "vui"`. **Not sent**: transcripts, audio, prompt text, user identifiers, install ID, IP. Fire-and-forget — failures or unreachable endpoints cannot slow the voice loop (see `src/vui/telemetry.py`).
+Vui sends an anonymous event each time it renders audio so we can see which preset voices people use and roughly how much speech the model produces in the wild. **What's sent**: `{app: "vui", event_type: "render", voice, seconds}` — and nothing else in the body. **Not in the event**: transcripts, audio, prompt text, user identifiers, install ID. Cloned voices are flagged as the literal string `"clone"` so source filenames never leak (`telemetry.py:59`). Source IP isn't included in the payload, but is necessarily visible to the receiving endpoint as part of the HTTPS request — we don't log or persist it. Fire-and-forget — failures or unreachable endpoints cannot slow the voice loop, and at most 32 events can be in flight at once (`telemetry.py:11`).
 
 Disable with an env var:
 

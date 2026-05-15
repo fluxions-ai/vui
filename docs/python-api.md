@@ -6,7 +6,7 @@ CUDA-only. For the Apple-Silicon MLX path see [the bottom of this doc](#apple-si
 
 ## Minimal example
 
-If your voice prompt is short (<15s), `Engine.from_checkpoint` + a one-segment prefill is all you need:
+If your voice prompt is short (<15s), `Engine()` + a one-segment prefill is all you need:
 
 ```python
 import torch
@@ -19,7 +19,7 @@ from vui.qwen_codec import SAMPLE_RATE as SR  # 24 kHz
 from vui.qwen_codec import QwenCodecEncoder
 from vui.inference import asr
 
-engine = Engine.from_checkpoint("vui-nano.safetensors")
+engine = Engine()  # name="vui-nano" by default; pass a name or local path to override
 
 # Encode the voice prompt (audio + transcript -> Segment)
 wav_16k = AudioDecoder("prompts/abraham.wav", sample_rate=16000, num_channels=1) \
@@ -63,7 +63,7 @@ from vui.prompt_utils import build_prompt_segments
 from vui.qwen_codec import SAMPLE_RATE as SR
 from vui.qwen_codec import QwenCodecEncoder
 
-engine = Engine.from_checkpoint("vui-nano.safetensors")
+engine = Engine()
 codec_enc = QwenCodecEncoder.from_pretrained().cuda().float().eval()
 
 # 90s voice prompt -> chunked segments
@@ -136,7 +136,7 @@ For low-latency playback (live chat, voice notes, calls), use `row.stream(...)` 
 ```python
 import sounddevice as sd, numpy as np
 
-engine = Engine.from_checkpoint("vui-nano.safetensors", max_rows=1)  # stream needs max_rows=1
+engine = Engine(max_rows=1)  # stream needs max_rows=1
 
 with engine.new_row() as row:
     row.prefill([Segment(prompt_text, prompt_codes)])
@@ -162,7 +162,7 @@ For batch jobs — bulk dataset generation, parallel TTS for multiple users — 
 ```python
 from vui.engine import Engine, GenConfig, RenderRequest, Segment
 
-engine = Engine.from_checkpoint("vui-nano.safetensors", max_rows=8)
+engine = Engine(max_rows=8)
 
 requests = [
     RenderRequest(

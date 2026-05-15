@@ -224,7 +224,7 @@ class TTSEngine:
     def setup(self):
         print("[TTS] Building Engine (backbone + RQ + vocoder CUDA graphs)...")
         self.engine = Engine(
-            self.model, self.codec_dec, max_rows=1, vocoder_ctx=VOCODER_CTX
+            model=self.model, codec=self.codec_dec, max_rows=1, vocoder_ctx=VOCODER_CTX
         )
         self.row = self.engine.new_row()
 

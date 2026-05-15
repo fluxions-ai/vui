@@ -48,6 +48,48 @@ async def handle(ctx: "ThoughtsStream", **args) -> None:
 2. **`SCHEMA`** is OpenAI-style function-call JSON. The LLM only sees this — make `description` directive ("Use when…") not narrative.
 3. **`RULE`** is appended into the system prompt under "RULES — read carefully:". One short block, optionally with negative cases. Skip it (set `RULE = ""`) if your `description` is unambiguous on its own.
 4. **`handle(ctx, **args)`** is `async`. `args` come straight from the model's tool call — be defensive (`args.get("x", default)`).
+5. **`TASK`** (optional) opts the tool into the UI tasks panel — see below.
+
+## Surfacing as a task (optional `TASK` block)
+
+Tools fire silently by default. To make a call visible — countdown, query, result, with the same × cancel affordance as `delegate` — export a `TASK` dict:
+
+```python
+TASK = {
+    "surface": True,        # required for the row to appear
+    "auto_done": True,      # default — mark row "done" when `handle()` returns
+}
+```
+
+When `TASK` is present, the dispatcher allocates a row *before* invoking `handle()` and attaches it to `ctx.task` (a `LocalTask`). The tool reads/writes the row through that handle:
+
+| Call | Effect |
+|---|---|
+| `ctx.task.update(description=..., status=..., result=..., error=...)` | Push any subset of fields to `srv._tasks[task_id]` and emit a `task_update` ws event. |
+| `ctx.task.on_cancel(cb)` | Register a sync/async callback to run when the user cancels (voice or × button). Typically `lambda: bg_task.cancel()`. |
+
+The initial description is auto-derived from the first non-empty arg matching `subject`/`query`/`task`/`description`/`label`, falling back to the tool name. Override it with `ctx.task.update(description=...)` if you want something prettier (e.g. `"pasta timer (300s)"`).
+
+`auto_done: False` keeps the row "running" after `handle()` returns — use it when the work continues in a spawned background task (e.g. `set_timer`'s countdown). The background task is responsible for calling `ctx.task.update(status="done"/"cancelled"/"error", result=...)` when it finishes.
+
+Tools without a `TASK` block see `ctx.task is None` and run invisibly (existing behaviour).
+
+### Status values & limits
+
+`LocalTask.update(status=...)` accepts any string, but the dispatcher, UI, and duplicate-detection logic in `thoughts.py` only understand four:
+
+| Status | When to set it |
+|---|---|
+| `running` | Default on creation. Nothing to set manually. |
+| `done` | The unit of work finished successfully. Pair with `result=...` to attach the text the relay LLM will paraphrase. With `auto_done=True` (the default) the dispatcher sets this for you. |
+| `cancelled` | User-driven abort — the `on_cancel` callback fires, then your background task should set this. |
+| `error` | Anything that failed. Pair with `error="..."` for a short message; an uncaught exception inside `handle()` is auto-mapped to `error` for you. |
+
+Other gotchas:
+
+- **Descriptions are truncated to 100 chars** in `start_local_task` and on every `update(description=...)` (`tasks.py:89, 121`). Anything longer gets clipped silently.
+- **Cancelled/error rows don't gate duplicate detection** — the next user request that fuzzy-matches a `cancelled` row will start fresh work, not get suppressed (`thoughts.py:_build_tasks_context`).
+- **`result` text feeds the relay LLM** verbatim — the conversation LLM paraphrases it into a spoken reply. Keep it concise and speakable; no markdown, no digit symbols, no URLs you don't want read aloud.
 
 ## What `ctx` gives you
 
@@ -87,9 +129,9 @@ SCHEMA = {
             "type": "object",
             "properties": {
                 "seconds": {"type": "integer", "description": "Duration in seconds."},
-                "label": {"type": "string", "description": "Optional label, e.g. 'pasta'."},
+                "subject": {"type": "string", "description": "What the timer is for, e.g. 'pasta'."},
             },
-            "required": ["seconds"],
+            "required": ["seconds", "subject"],
         },
     },
 }
@@ -100,20 +142,38 @@ set_timer: user says "set a timer for X", "remind me in X minutes", "X minute ti
 - NOT for calendar reminders (those are delegate).
 """
 
+# Show the timer as a UI task row so the user can cancel it; keep the row
+# "running" until `_fire` finishes (auto_done=False).
+TASK = {"surface": True, "auto_done": False}
+
 
 async def handle(ctx, **args) -> None:
     seconds = int(args.get("seconds", 0) or 0)
-    label = (args.get("label") or "").strip()
+    subject = (args.get("subject") or "reminder").strip()
+    task = ctx.task
     if seconds <= 0:
+        if task:
+            task.update(status="error", error="invalid duration")
         return
-    desc = f"{label} timer" if label else "timer"
+    desc = f"{subject} timer"
     _slog(f"[set_timer] {desc} for {seconds}s")
+    if task:
+        task.update(description=f"{desc} ({seconds}s)")
 
     async def _fire():
-        await asyncio.sleep(seconds)
+        try:
+            await asyncio.sleep(seconds)
+        except asyncio.CancelledError:
+            if task:
+                task.update(status="cancelled")
+            raise
+        if task:
+            task.update(status="done", result=f"{desc} fired")
         await ctx._speak(f"Your {desc} is up.")
 
-    _spawn(_fire(), f"timer_{desc}")
+    fire_task = _spawn(_fire(), f"timer_{desc}")
+    if task:
+        task.on_cancel(lambda: fire_task.cancel())
 ```
 
 Drop the file in this directory, then `curl -X POST http://localhost:8080/tools/reload` (or restart). Say *"set a timer for 30 seconds"* — done.
@@ -126,8 +186,9 @@ Drop the file in this directory, then `curl -X POST http://localhost:8080/tools/
 
 ## When NOT to write a tool here
 
-- **Anything needing live web/MCP data** — use `delegate` and let `claude-task` handle it.
+- **Single-query factual web lookups** — already covered by the built-in `web_search` tool (Serper / Brave / Tavily backends). Don't write a parallel one.
+- **Multi-step research or anything needing MCP integrations** (Gmail, Calendar, Slack, …) — use `delegate` and let `claude-task` handle it.
 - **Anything that needs multi-step reasoning** — `handle()` runs once per turn, no agent loop.
-- **State you'd want UI affordances for** — first-class tasks (`tasks.py`) already have create/cancel/list/check; don't reinvent them as one-shot tools.
+- **State you'd want UI affordances for** — declare `TASK` (above) instead of building parallel tracking; the existing tasks panel handles create/cancel/list/check.
 
 See `docs/thoughts-tools.md` for the full overview.

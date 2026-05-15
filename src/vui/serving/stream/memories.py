@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from vui.serving.stream.server import StreamServer
 
 MEMORIES_PATH = Path.home() / ".vui" / "memories.json"
+SEEDED_GEO_MARKER = Path.home() / ".vui" / ".seeded_geo"
 MAX_MEMORIES = 15
 
 
@@ -205,6 +206,34 @@ def _sync(srv: StreamServer):
     save_memories(srv._memories_store)
     srv._memories = memories_to_strings(srv._memories_store)
     _push_to_client(srv)
+
+
+def seed_geo_memory(store: list[dict]) -> bool:
+    """Idempotently add a 'user is based in X' memory derived from the host
+    locale/timezone. Called once on server startup, before the store goes
+    into the system prompt. Returns True if a memory was added.
+
+    Respects deletion: if the seed has been added before (marker file
+    present) and the user removed it, we leave it removed.
+    """
+    from vui.geo import country_name, detect_country
+
+    if any(m.get("source") == "system_geo" for m in store):
+        return False  # already there
+    if SEEDED_GEO_MARKER.exists():
+        return False  # was there, user deleted — respect that
+
+    cc = detect_country()
+    text = f"User is based in {country_name(cc)}."
+    store.append({"text": text, "created": time.time(), "source": "system_geo"})
+    save_memories(store)
+    try:
+        SEEDED_GEO_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        SEEDED_GEO_MARKER.touch()
+    except OSError as e:
+        _slog(f"[memories] couldn't write geo marker: {e}")
+    _slog(f"[memories] seeded geo: {text!r}")
+    return True
 
 
 def _push_to_client(srv: StreamServer):

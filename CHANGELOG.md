@@ -34,10 +34,16 @@ streaming conversational voice assistant.
 - **Memories** — assistant remembers facts across sessions, persisted to
   `~/.vui/memories.json`.
 - **Thoughts stream** — parallel LLM that routes voice intent to ~10 tools
-  (memory ops, task control, delegation) without a wake-word grammar; pluggable
-  for user-defined local tools (`src/vui/serving/stream/tools/`).
+  (memory ops, task control, web search, delegation) without a wake-word
+  grammar; pluggable for user-defined local tools
+  (`src/vui/serving/stream/tools/`).
+- **Built-in `web_search` tool** — single-query factual lookups via a pluggable
+  backend (Serper, Brave, or Tavily — first one with a key wins, or pin with
+  `VUI_SEARCH_PROVIDER`). One HTTP round-trip, no `claude-task` needed; falls
+  through to `delegate` for multi-step research or account-bound queries.
 - **Claude task server** (optional sidecar) — handles slow/agentic work
-  (Gmail, Calendar, Drive, Slack, web search) via the host's Claude Code MCPs.
+  (Gmail, Calendar, Drive, Slack, multi-step web research) via the host's
+  Claude Code MCPs.
   Auto-discovered on boot. Speaks Anthropic's `/v1/messages`; can be backed by
   Ollama, z.ai, DeepSeek, vLLM, LM Studio, or LiteLLM via `ANTHROPIC_BASE_URL`.
 - **Apple Silicon (MLX) backend** — auto-detected; first-run auto-setup of
