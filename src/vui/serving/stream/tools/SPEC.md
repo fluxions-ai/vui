@@ -49,6 +49,7 @@ async def handle(ctx: "ThoughtsStream", **args) -> None:
 3. **`RULE`** is appended into the system prompt under "RULES — read carefully:". One short block, optionally with negative cases. Skip it (set `RULE = ""`) if your `description` is unambiguous on its own.
 4. **`handle(ctx, **args)`** is `async`. `args` come straight from the model's tool call — be defensive (`args.get("x", default)`).
 5. **`TASK`** (optional) opts the tool into the UI tasks panel — see below.
+6. **`REQUIRES_TASK_SERVER = True`** (optional) marks the tool as unusable when the claude-task server is unreachable. The registry then drops both its `SCHEMA` and `RULE` from what the evaluator sees, so the LLM can't pick it. Use this for any tool whose `handle()` calls `srv._create_task(...)`.
 
 ## Surfacing as a task (optional `TASK` block)
 
