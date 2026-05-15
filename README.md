@@ -161,7 +161,7 @@ The demo's *Advanced* panel exposes two conditioning vectors that bias generatio
   - **NISQA Loudness** — volume level
 - **WPS — words per second** (`0–6`, typical conversational range ~2–4). Speaking-rate target. Useful when a prompt is making the model rush or drag; leave at `0` to let it follow the prompt's natural pace (estimated from the prompt's word count and frame length, see `engine.py:749-754`).
 
-Defaults `sq = (3.5, 4.0, 4.0, 4.0, 4.0, 0.0)` and `wps = 0` give neutral, clean output. Push SQ toward 5 across the board for cleaner-sounding audio (at the cost of some liveliness); drop them to mimic phone / lo-fi / noisy recordings.
+Defaults `sq = (0, 0, 0, 0, 0, 5)` and `wps = 0` — only **loudness** is conditioned (pinned to 5), the other five channels are disabled. This gives the most consistent output in practice. To bias toward cleaner audio (at the cost of some liveliness), push the first five channels up toward 5; to mimic phone / lo-fi / noisy recordings, set them to **low non-zero values (~1–2)** — setting them to `0` doesn't make output lo-fi, it just turns the channel off (the `sq_proj` is a bias-free linear layer, so 0 → no contribution).
 
 ## Claude task server (optional)
 

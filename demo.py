@@ -168,7 +168,7 @@ if USE_MLX:
         temperature: float = 0.8,
         top_k: int = 300,
         max_secs: float = 120,
-        sq_scores: tuple = (3.5, 4.0, 4.0, 4.0, 4.0, 0.0),
+        sq_scores: tuple = (0.0, 0.0, 0.0, 0.0, 0.0, 5.0),
         wps_score: float = 0.0,
         rep_penalty: float = 1.4,
         rep_window: int = 24,
@@ -284,12 +284,12 @@ DEFAULTS = {
     "use_top_p": False,
     "top_p": 1.0,
     "max_duration": 120,
-    "sq_dns_sig": 3.5,
-    "sq_dns_bak": 4.0,
-    "sq_nq_noi": 4.0,
-    "sq_nq_disc": 4.0,
-    "sq_nq_col": 4.0,
-    "sq_nq_loud": 0.0,
+    "sq_dns_sig": 0.0,
+    "sq_dns_bak": 0.0,
+    "sq_nq_noi": 0.0,
+    "sq_nq_disc": 0.0,
+    "sq_nq_col": 0.0,
+    "sq_nq_loud": 5.0,
     "wps_score": 0.0,
     "rep_penalty": 1.1,
     "rep_window": 0,
@@ -710,7 +710,7 @@ _engine_row = None  # cached Row; prompt prefilled on demand
 
 if USE_MLX:
     print("MLX warmup...")
-    cond_bias_warmup = compute_cond_bias(model, sq=[3.5, 4.0, 4.0, 4.0, 4.0, 0.0])
+    cond_bias_warmup = compute_cond_bias(model, sq=[0.0, 0.0, 0.0, 0.0, 0.0, 5.0])
     warmup_codes, _ = generate_chunked_mlx(
         model, "Hello warmup.", cond_bias_warmup, max_secs=3
     )

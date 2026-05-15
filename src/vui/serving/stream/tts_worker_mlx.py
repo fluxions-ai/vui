@@ -29,7 +29,7 @@ from vui.mlx.tts.weights import load_from_pytorch
 from vui.serving.stream.tts_worker import chunk_text
 
 PROMPTS_DIR = Path("prompts")
-SQ_DEFAULTS = [3.5, 4.0, 4.0, 4.0, 4.0, 4.0, 0.0]
+SQ_DEFAULTS = [0.0, 0.0, 0.0, 0.0, 0.0, 5.0]
 
 
 class MLXTTSEngine:
