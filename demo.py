@@ -750,9 +750,28 @@ KNOWN_CHECKPOINTS = [
 ]
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
+PRESET_VOICES = ["maeve", "abraham", "rhian", "harry"]
+
+
+def _ensure_preset_prompts():
+    """Fetch the 4 fine-tuned preset wavs from HF on first run."""
+    PROMPTS_DIR.mkdir(exist_ok=True)
+    from huggingface_hub import hf_hub_download
+    for stem in PRESET_VOICES:
+        dst = PROMPTS_DIR / f"{stem}.wav"
+        if dst.exists():
+            continue
+        try:
+            cached = hf_hub_download("fluxions/vui", f"prompts/{stem}.wav")
+            import shutil
+            shutil.copy(cached, dst)
+            print(f"  Fetched preset voice: {stem}")
+        except Exception as e:
+            print(f"  Failed to fetch preset {stem}: {e}")
 
 
 def _list_default_prompts() -> list[str]:
+    _ensure_preset_prompts()
     if not PROMPTS_DIR.exists():
         return []
     return sorted(p.stem for p in PROMPTS_DIR.glob("*.wav"))
