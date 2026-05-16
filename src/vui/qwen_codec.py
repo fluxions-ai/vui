@@ -28,7 +28,6 @@ SAMPLE_RATE = 24000
 DOWNSAMPLE_RATE = 1920
 FRAME_RATE = SAMPLE_RATE / DOWNSAMPLE_RATE  # 12.5
 N_CODEBOOKS = 16
-CODEBOOK_SIZE = 2048
 
 # ---------------------------------------------------------------------------
 # Shared building blocks
@@ -392,24 +391,6 @@ class QwenCodecEncoder(StreamingContainer):
 
     def encode(self, audio: Tensor) -> Tensor:
         return self.forward(audio)
-
-    def encode_chunked(
-        self, audio: Tensor, chunk_frames: int = 300, ctx_frames: int = 25
-    ) -> Tensor:
-        chunk_samples = chunk_frames * DOWNSAMPLE_RATE
-        ctx_samples = ctx_frames * DOWNSAMPLE_RATE
-        T = audio.shape[-1]
-        all_codes = []
-        start = 0
-        while start < T:
-            end = min(start + chunk_samples, T)
-            ctx_size = min(ctx_samples, start)
-            chunk = audio[..., start - ctx_size : end]
-            codes = self.forward(chunk)
-            ctx_out = ctx_size // DOWNSAMPLE_RATE
-            all_codes.append(codes[:, :, ctx_out:])
-            start = end
-        return torch.cat(all_codes, dim=-1)
 
     @classmethod
     def from_pretrained(
@@ -1292,13 +1273,6 @@ class QwenCodecDecoder(StreamingContainer):
         self._decode_graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._decode_graph, pool=pool):
             self._graph_audio_out = self.forward(self._graph_codes_in)
-
-        self._graph_n_frames = n_frames
-
-    def decode_graph(self, codes: Tensor) -> Tensor:
-        self._graph_codes_in.copy_(codes)
-        self._decode_graph.replay()
-        return self._graph_audio_out
 
     @classmethod
     def from_pretrained(

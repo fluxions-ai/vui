@@ -14,7 +14,7 @@ from aiohttp import web
 from aiortc import RTCPeerConnection, RTCSessionDescription
 
 import vui.serving.stream.server as _srv_mod
-from vui.serving.stream._log import _slog, _spawn
+from vui.serving.stream._log import _slog, _spawn, _warn
 from vui.serving.stream.frontend import get_html
 from vui.serving.stream.llm import (
     GGUF_MODEL_NAME,
@@ -43,6 +43,63 @@ _USER_NAME_PATTERNS = [
     re.compile(r"\b(?:i'?m|i am)\s+called\s+([A-Z][a-z]+)", re.IGNORECASE),
     re.compile(r"\bcall me\s+([A-Z][a-z]+)", re.IGNORECASE),
 ]
+
+
+def _probe_ollama_num_parallel() -> int | None:
+    """Read the live Ollama daemon's OLLAMA_NUM_PARALLEL.
+
+    Ollama doesn't expose this via API or CLI; we have to ask the OS.
+    Cascade: systemd unit → /proc/<pid>/environ → launchctl. Returns
+    None if Ollama isn't running under any path we can read — the
+    caller should skip the warning rather than guess.
+    """
+    import subprocess
+
+    def _parse_env_line(s: str) -> int | None:
+        for kv in s.split():
+            k, _, v = kv.partition("=")
+            if k == "OLLAMA_NUM_PARALLEL" and v.isdigit():
+                return int(v)
+        return None
+
+    # 1. systemd-launched Ollama (Linux). No sudo needed.
+    try:
+        out = subprocess.run(
+            ["systemctl", "show", "ollama", "--property=Environment"],
+            capture_output=True, text=True, timeout=2,
+        ).stdout.removeprefix("Environment=")
+        n = _parse_env_line(out)
+        if n is not None:
+            return n
+    except Exception:
+        pass
+
+    # 2. /proc/<pid>/environ (Linux). Same-uid only — Ollama usually
+    # runs under its own user so this only catches shell-launched daemons.
+    try:
+        pid = subprocess.run(
+            ["pgrep", "-x", "ollama"], capture_output=True, text=True, timeout=2,
+        ).stdout.split()[0]
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            env = f.read().decode(errors="replace").replace("\0", " ")
+        n = _parse_env_line(env)
+        if n is not None:
+            return n
+    except Exception:
+        pass
+
+    # 3. launchctl getenv (macOS) — only catches vars set via `launchctl setenv`.
+    try:
+        v = subprocess.run(
+            ["launchctl", "getenv", "OLLAMA_NUM_PARALLEL"],
+            capture_output=True, text=True, timeout=2,
+        ).stdout.strip()
+        if v.isdigit():
+            return int(v)
+    except Exception:
+        pass
+
+    return None
 
 
 def _extract_user_name(memories: list[str]) -> str | None:
@@ -607,25 +664,18 @@ async def warmup(srv: StreamServer):
     print(f"[main] LLM probe: {'up' if llm_up else 'DOWN'}")
     await srv._send_llm_status()
 
-    # Warn if OLLAMA_NUM_PARALLEL < 2 (server uses 2 concurrent LLM calls per turn)
+    # Warn if Ollama's OLLAMA_NUM_PARALLEL < 2. We have to ask the OS —
+    # Ollama doesn't surface this via API/CLI, and reading our own
+    # `os.environ` is meaningless since Ollama is a separate daemon.
     if llm_up:
-        try:
-            from vui.serving.stream.llm_backend import get_backend
-            base_url = get_backend().base_url
-            async with httpx.AsyncClient(timeout=3) as client:
-                r = await client.get(f"{base_url}/api/ps")
-                if r.status_code == 200:
-                    import os
-                    np = os.environ.get("OLLAMA_NUM_PARALLEL", "1")
-                    if int(np) < 2:
-                        print(
-                            "[main] WARN: OLLAMA_NUM_PARALLEL is not set (default 1). "
-                            "The server makes 2 concurrent LLM calls per turn. "
-                            "Set OLLAMA_NUM_PARALLEL=2 for better latency: "
-                            "launchctl setenv OLLAMA_NUM_PARALLEL 2"
-                        )
-        except Exception:
-            pass
+        n_par = _probe_ollama_num_parallel()
+        if n_par is not None and n_par < 2:
+            _warn(
+                f"[main] WARN: Ollama is configured with OLLAMA_NUM_PARALLEL={n_par}. "
+                "This server fires 2 concurrent LLM calls per turn (response + thoughts), "
+                "so they'll serialise. Set OLLAMA_NUM_PARALLEL>=2 in the Ollama daemon "
+                "(systemd unit Environment= line, or `launchctl setenv` on macOS) and restart it."
+            )
 
     _spawn(_task_server_poll_loop(srv), "task_server_poll")
     _spawn(_llm_poll_loop(srv), "llm_poll")

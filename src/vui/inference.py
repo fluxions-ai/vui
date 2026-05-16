@@ -64,53 +64,6 @@ def asr(chunk, model=None, prefix=None, prompt=None):
     return result[0].text
 
 
-_moonshine_transcriber = None
-
-
-def asr_moonshine(audio: Tensor, sr_in: int = 24000, model_arch: int = 4) -> str:
-    """Transcribe a (T,) or (1, T) audio tensor with moonshine_voice (CPU, fast).
-
-    Expects audio sampled at sr_in; will resample to 16 kHz internally.
-    """
-    import ctypes
-
-    import numpy as np
-    from julius.resample import resample_frac
-    from moonshine_voice import Transcriber, get_model_for_language
-    from moonshine_voice.errors import check_error
-    from moonshine_voice.moonshine_api import TranscriptC
-
-    global _moonshine_transcriber
-    if _moonshine_transcriber is None:
-        model_path, arch = get_model_for_language("en", model_arch)
-        _moonshine_transcriber = Transcriber(model_path=model_path, model_arch=arch)
-
-    if audio.dim() == 1:
-        audio = audio.unsqueeze(0)
-    audio = audio.detach().float().cpu()
-    if sr_in != 16000:
-        audio = resample_frac(audio, sr_in, 16000)
-    arr = np.ascontiguousarray(audio.squeeze(0).numpy(), dtype=np.float32)
-    ptr = arr.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-    out = ctypes.POINTER(TranscriptC)()
-    err = _moonshine_transcriber._lib.moonshine_transcribe_without_streaming(
-        _moonshine_transcriber._handle, ptr, len(arr), 16000, 0, ctypes.byref(out)
-    )
-    check_error(err)
-    transcript = _moonshine_transcriber._parse_transcript(out)
-    return " ".join(line.text.strip() for line in transcript.lines if line.text.strip())
-
-
-# def replace_numbers_with_words(text):
-#     global engine
-#     if engine is None:
-#         engine = inflect.engine()
-#     def number_to_words(match):
-#         number = match.group()
-#         return engine.number_to_words(number) + " "
-#     return re.sub(r"\d+", number_to_words, text)
-
-
 valid_non_speech = [t for t in SPECIAL_TOKENS if t.startswith("[") and t.endswith("]")]
 
 
@@ -287,10 +240,8 @@ class InferenceState:
             Prompt text/audio should NOT have cond_bias (matching demo.py behavior).
 
         Returns total offset (number of tokens in KV cache).
-        Stores last hidden state in self._prefill_hidden for first-frame decode.
         """
         cond_bias = self.model._cond_bias
-        out = None
         for i, (seg_type, data) in enumerate(segments):
             is_last = i == len(segments) - 1
             bias = cond_bias if (not cond_last or is_last) else 0
@@ -305,18 +256,9 @@ class InferenceState:
                 emb = self.model.embed_audio(data.to(self.device)).unsqueeze(0) + bias
                 n = emb.shape[1]
             positions = torch.arange(self.offset, self.offset + n, device=self.device)
-            out = self.model.decoder.forward_flash(emb, positions)
+            self.model.decoder.forward_flash(emb, positions)
             self.offset += n
-        if out is not None:
-            hidden = out[:, -1]
-            self._prefill_hidden = hidden
-            self._prefill_logits = self.model.codec_head(hidden)
-            self._prefill_eos = self.model.eos_head(hidden)
         return self.offset
-
-    def _prefill(self, text: str) -> int:
-        """Legacy text-only prefill. Resets cache first."""
-        return self.prefill([("text", text)])
 
     _ckpt_offset: int = 0
     _ckpt_spk_token: Tensor | None = None
@@ -544,48 +486,6 @@ def _apply_rep_penalty_cb0_fast(
         v = logits[0, tok_id]
         logits[0, tok_id] = v / p if v > 0 else v * p
     return logits
-
-
-# Backward-compat shim still used by callers that prefer the simple API.
-def _apply_rep_penalty_cb0(
-    logits: Tensor, past: list[int], penalty: float, window: int
-) -> Tensor:
-    if penalty <= 1.0 or not past:
-        return logits
-    history = past[-window:] if window > 0 else past
-    from collections import Counter as _C
-
-    return _apply_rep_penalty_cb0_fast(logits, dict(_C(history)), penalty)
-
-
-def _compute_rq_logit_bias(
-    past_codes_per_q: list[list[int]],
-    penalty: float,
-    window: int,
-    n_quantizers: int,
-    codebook_size: int,
-    device,
-) -> Tensor | None:
-    if penalty <= 1.0:
-        return None
-    import math as _math
-    from collections import Counter as _C
-
-    bias = torch.zeros(
-        n_quantizers - 1, codebook_size, device=device, dtype=torch.float32
-    )
-    log_p = _math.log(penalty)
-    for q_idx in range(n_quantizers - 1):
-        cb = q_idx + 1
-        if cb >= len(past_codes_per_q):
-            continue
-        history = past_codes_per_q[cb][-window:] if window > 0 else past_codes_per_q[cb]
-        if not history:
-            continue
-        counts = _C(history)
-        for tok_id, count in counts.items():
-            bias[q_idx, tok_id] = -count * log_p
-    return bias
 
 
 def _sample_codes(
@@ -858,20 +758,6 @@ def render_codes_stream(state: InferenceState, text: str, **kwargs):
             pending = []
 
 
-def render_codes(
-    state: InferenceState, text: str, **kwargs
-) -> tuple[Tensor | None, list[dict]]:
-    """Batched variant: returns (all_codes, chunks_meta)."""
-    pieces: list[Tensor] = []
-    metas: list[dict] = []
-    for turn_codes, chunk in render_codes_stream(state, text, **kwargs):
-        pieces.append(turn_codes)
-        metas.append(chunk)
-    if not pieces:
-        return None, metas
-    return torch.cat(pieces, dim=0), metas
-
-
 def render_audio_stream(
     state: InferenceState,
     text: str,
@@ -938,11 +824,3 @@ def render_audio_stream(
             keep = min(ctx_size, len(buf))
             buf = buf[-keep:] if keep > 0 else []
             emitted = keep
-
-
-def render_audio(state: InferenceState, text: str, **kwargs) -> Tensor:
-    """Batched audio: returns full (1, 1, samples) waveform."""
-    pieces = list(render_audio_stream(state, text, **kwargs))
-    if not pieces:
-        return torch.zeros(1, 1, 0, device=state.device)
-    return torch.cat(pieces, dim=-1)

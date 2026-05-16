@@ -69,7 +69,6 @@ Three OS processes connected by `torch.multiprocessing.Queue`. Main aiohttp/WebR
 | `tts_worker_mlx.py` | MLX TTS worker (Apple Silicon). |
 | `asr_worker.py` | ASR worker process; backend selected via `asr/`. |
 | `audio_in_worker.py` | Mic ingest worker. |
-| `codec_worker.py` | Codec encode/decode worker. |
 | `vad.py` | Silero VAD (ONNX model at `silero_vad.onnx`). |
 | `playback.py` | Outbound audio scheduling / backpressure. |
 | `drains.py` | Sentence-level TTS chunking + drain coordination. |

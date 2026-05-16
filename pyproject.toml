@@ -11,9 +11,9 @@ requires-python = ">=3.12,<3.13"
 
 dependencies = [
     # Model & inference
-    "torch>=2.5",
-    "torchaudio>=2.5",
-    "torchcodec>=0.5",
+    "torch==2.11.*",
+    "torchaudio==2.11.*",
+    "torchcodec==0.11.*",
     "transformers>=4.45",
     "tokenizers>=0.20",
     "safetensors>=0.4",
@@ -24,29 +24,27 @@ dependencies = [
     "soundfile>=0.12",
     "openai-whisper",
     "julius>=0.2",
-
     # Streaming server
     "aiohttp>=3.10",
     "aiortc>=1.9",
     "av>=12",            # WebRTC AudioFrame / AudioResampler — aiortc's wire type
     "filelock>=3.16",
     "httpx>=0.27",
-
     # ASR (faster-whisper default; silero VAD ONNX bundled in serving/stream/)
     "faster-whisper>=1.0",
     "onnxruntime>=1.19",
-
     # Demo UI
     "gradio>=5.0",
     "tiktoken>=0.8",
-
     # Claude task delegation server (always installed — `claude_server.py`
     # imports it at module load).
     "claude-agent-sdk>=0.1.70",
-
     # CUDA flash-attn — Linux only. Pre-built wheel via [tool.uv.sources].
     # Install with `uv` (not pip — pip ignores [tool.uv.sources] and tries to source-build).
     "flash-attn ; sys_platform == 'linux'",
+    # ctranslate2 (faster-whisper) dlopens libcublas.so.12 at import time;
+    # torch brings cu13. This supplies the cu12 ABI ctranslate2 needs.
+    "nvidia-cublas-cu12 ; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
