@@ -10,6 +10,11 @@ if TYPE_CHECKING:
     from vui.serving.stream.thoughts import ThoughtsStream
 
 
+# Filtered out of the evaluator's tool list when the claude-task server is
+# unreachable — `_create_task` would fail otherwise.
+REQUIRES_TASK_SERVER = True
+
+
 SCHEMA = {
     "type": "function",
     "function": {

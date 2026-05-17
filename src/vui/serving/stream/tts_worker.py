@@ -344,7 +344,10 @@ class TTSEngine:
         ctx_buf = self.row._codec_ctx._buf
         ctx_frames = ctx_buf.shape[2] if ctx_buf is not None else 0
         ctx_q = ctx_buf.shape[1] if ctx_buf is not None else 0
-        seg_shapes = [(t[:30], c.shape[0] if c is not None else 0) for t, c in segments]
+        seg_shapes = [
+            (t[:30], tuple(c.shape) if c is not None else ())
+            for t, c in segments
+        ]
         _logf(
             f"[TTS.prompt] segments={len(segments)} {seg_shapes} "
             f"T=0->{self.row.offset} codec_ctx={ctx_frames}f/Q={ctx_q} "
@@ -358,7 +361,8 @@ class TTSEngine:
         self._seq_reset()
         for t, c in segments:
             nf = c.shape[0] if c is not None else 0
-            self._seq_add(f'[prompt] [spk] "{t}" [{nf}f]')
+            nq = c.shape[1] if c is not None and c.dim() > 1 else 0
+            self._seq_add(f'[prompt] [spk] "{t}" [{nf}f/Q={nq}]')
         self._seq_add("[SC]")
         self._log_seq("prefill_prompt")
 
@@ -1017,7 +1021,8 @@ class TTSEngine:
         )
         self._seq_reset()
         nf = self.prompt_codes.shape[0]
-        self._seq_add(f'[prompt] [spk] "{self.prompt_text}" [{nf}f]')
+        nq = self.prompt_codes.shape[1] if self.prompt_codes.dim() > 1 else 0
+        self._seq_add(f'[prompt] [spk] "{self.prompt_text}" [{nf}f/Q={nq}]')
         self._seq_add("[SC]")
         self._log_seq("load_kv")
         return saved.get("name", path.stem)

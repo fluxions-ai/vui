@@ -115,7 +115,72 @@ def strip_orphan_brackets(srv: StreamServer, text: str) -> str:
     return "".join(out)
 
 
+def _norm_for_spec_match(s: str) -> str:
+    """Strict-prefix match key for speculative reply lookup. ASR partials
+    rarely have terminal punctuation; the committed text often does. Strip
+    trailing punct + whitespace, lowercase. Anything stricter (token-level)
+    is overkill for a heuristic gate."""
+    return (s or "").rstrip(" .?!,").lower()
+
+
+async def _spec_stream_reply(srv: StreamServer, partial_text: str):
+    """Stream a full LLM reply for `partial_text` into srv._spec_reply.
+    Runs as a background task; voice_respond awaits it on commit if the
+    final transcript matches.
+    """
+    from vui.serving.stream.llm_backend import get_backend
+    from vui.serving.stream.prompts import build_memory_context
+
+    t0 = time.monotonic()
+    sys_prompt = srv.session.soul
+    mem_ctx = build_memory_context(srv)
+    if mem_ctx:
+        sys_prompt = sys_prompt + "\n\n" + mem_ctx
+    messages = (
+        [{"role": "system", "content": sys_prompt}]
+        + recent_conversation(srv)
+        + [{"role": "user", "content": partial_text}]
+    )
+    buf: list[str] = []
+    try:
+        async for tok in get_backend().stream(messages, max_tokens=2048):
+            buf.append(tok)
+            srv._spec_reply = "".join(buf)
+        srv._spec_reply_done = True
+        _slog(
+            f"[main.llm] spec reply done {(time.monotonic()-t0)*1000:.0f}ms "
+            f"n={len(srv._spec_reply)}c text='{partial_text[:40]}'"
+        )
+    except asyncio.CancelledError:
+        _slog(
+            f"[main.llm] spec reply cancelled +{(time.monotonic()-t0)*1000:.0f}ms "
+            f"text='{partial_text[:40]}'"
+        )
+        raise
+    except Exception as e:
+        _slog(f"[main.llm] spec reply error: {e}")
+
+
 async def llm_speculative_prefill(srv: StreamServer, partial_text: str):
+    if bool(srv.session.settings.get("speculative_reply", False)):
+        # Full-reply speculation: cancel any in-flight spec for older
+        # partial text and start fresh. Unlike the KV-warm path (1-token
+        # completion), we can't just skip on collision — a stale stream
+        # would keep growing into the buffer for text the user has
+        # already revised past, then get matched by the strict-equality
+        # check below in voice_respond.
+        if srv._spec_task and not srv._spec_task.done():
+            srv._spec_task.cancel()
+            try:
+                await srv._spec_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        srv._spec_reply_for_text = partial_text
+        srv._spec_reply = ""
+        srv._spec_reply_done = False
+        srv._spec_task = asyncio.create_task(_spec_stream_reply(srv, partial_text))
+        return
+
     # Single in-flight gate — see StreamServer._prefill_inflight. Without
     # this, slow LLMs stack up multiple prefills per turn, all useless.
     if srv._prefill_inflight:
@@ -146,6 +211,51 @@ async def llm_speculative_prefill(srv: StreamServer, partial_text: str):
         pass
     finally:
         srv._prefill_inflight = False
+
+
+async def _chunks_from_buffer(text: str, max_words: int):
+    """Yield (chunk, is_final) over a complete buffered LLM reply, using
+    the same sentence-end / word-count splitter as llm_stream_chunks.
+    Lets voice_respond reuse its chunk loop unchanged when consuming a
+    speculated reply.
+    """
+    from vui.serving.stream.llm import _SENT_END_RE
+
+    buf = text
+    pending: str | None = None
+    while True:
+        m = _SENT_END_RE.search(buf)
+        if m is None:
+            break
+        chunk = buf[: m.end()].strip()
+        buf = buf[m.end() :].lstrip()
+        if not chunk:
+            continue
+        if pending is not None:
+            yield pending, False
+        pending = chunk
+    while len(buf.split()) >= max_words:
+        words = buf.split()
+        chunk = " ".join(words[:max_words]).rstrip(",;:")
+        buf = " ".join(words[max_words:])
+        if buf:
+            buf = " " + buf
+        if chunk:
+            if pending is not None:
+                yield pending, False
+            pending = chunk
+    trailing = buf.strip()
+    while trailing and trailing[-1] in ",;:- ":
+        trailing = trailing[:-1].rstrip()
+    if trailing and trailing[-1] not in ".!?\"')]":
+        trailing = trailing + "."
+    if pending is not None and trailing:
+        yield pending, False
+        yield trailing, True
+    elif pending is not None:
+        yield pending, True
+    elif trailing:
+        yield trailing, True
 
 
 async def voice_respond(srv: StreamServer, asr_text: str, user_codes, audio_16k=None):
@@ -346,13 +456,75 @@ async def _voice_respond_body(
             sys_prompt = sys_prompt + "\n\n" + mem_ctx
         conv = recent_conversation(srv)
         llm_stats: dict = {}
-        async for chunk_text, is_done in llm_stream_chunks(
-            conv,
-            sys_prompt,
-            srv.ollama_model,
-            max_words=chunk_w,
-            stats=llm_stats,
-        ):
+
+        # Speculative-reply consumer. If a background spec stream was
+        # fired for a partial transcript that's a bounded prefix of the
+        # committed asr_text, await it and pump its buffered text through
+        # the same chunker instead of starting a fresh LLM stream. Prefix
+        # (not equality) because the last ASR stable_prefix almost never
+        # includes the trailing few words — by commit time the user has
+        # added "you know" / "today" / etc. We tolerate up to ~30 chars
+        # of trailing content (≈5 words); beyond that the user likely
+        # added new semantic content the LLM didn't see, so fall back.
+        spec_text = ""
+        if bool(srv.session.settings.get("speculative_reply", False)):
+            spec_for = _norm_for_spec_match(srv._spec_reply_for_text)
+            real_for = _norm_for_spec_match(asr_text)
+            extra = len(real_for) - len(spec_for)
+            prefix_ok = (
+                bool(spec_for)
+                and real_for.startswith(spec_for)
+                and 0 <= extra <= 30
+            )
+            if prefix_ok and srv._spec_task is not None:
+                _slog(
+                    f"[main.spec] match — awaiting spec task "
+                    f"(done={srv._spec_reply_done}, n={len(srv._spec_reply)}c)"
+                )
+                try:
+                    await srv._spec_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                if srv._spec_reply_done and srv._spec_reply.strip():
+                    spec_text = srv._spec_reply
+                    _slog(
+                        f"[main.spec] using buffered reply ({len(spec_text)}c) "
+                        f"+{(time.monotonic()-t_llm_start)*1000:.0f}ms"
+                    )
+            else:
+                _slog(
+                    f"[main.spec] miss (spec_for='{spec_for[:40]}' "
+                    f"real_for='{real_for[:40]}')"
+                )
+                # Miss: an in-flight spec for a different partial is now
+                # useless and would compete with the real LLM stream for
+                # backend bandwidth. Cancel before falling through.
+                if srv._spec_task and not srv._spec_task.done():
+                    srv._spec_task.cancel()
+                    try:
+                        await srv._spec_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+            # One-shot: clear the buffer either way so the next turn
+            # starts clean. Stale buffers from a prior turn must never
+            # be reused on a future false match.
+            srv._spec_reply_for_text = ""
+            srv._spec_reply = ""
+            srv._spec_reply_done = False
+            srv._spec_task = None
+
+        stream_source = (
+            _chunks_from_buffer(spec_text, chunk_w)
+            if spec_text
+            else llm_stream_chunks(
+                conv,
+                sys_prompt,
+                srv.ollama_model,
+                max_words=chunk_w,
+                stats=llm_stats,
+            )
+        )
+        async for chunk_text, is_done in stream_source:
             if srv.session.cancel_generation or srv._thoughts_stop_llm:
                 break
             t_llm_done = time.monotonic()

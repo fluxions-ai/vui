@@ -258,20 +258,6 @@ class MHA(nn.Module):
         return self.out_proj(out.reshape(B, T, self.dim))
 
 
-class MLP(nn.Module):
-    def __init__(
-        self, *, d_model: int, bias: bool, dropout: float, act=nn.GELU, **kwargs
-    ):
-        super().__init__()
-        self.fc1 = nn.Linear(d_model, 4 * d_model, bias=bias)
-        self.act = act()
-        self.fc2 = nn.Linear(4 * d_model, d_model, bias=bias)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        return self.dropout(self.fc2(self.act(self.fc1(x))))
-
-
 class LlamaMLP(nn.Module):
     def __init__(
         self,
@@ -484,19 +470,6 @@ class Decoder(nn.Module):
         self.head_dim = head_dim
         self.flash_kv_caches: list[FlashKVCache] | None = None
 
-    def allocate_inference_cache(
-        self, batch_size: int, device: str, dtype=torch.bfloat16
-    ):
-        for block in self.blocks:
-            block.attn.kv_cache = KVCache(
-                batch_size, self.max_seqlen, block.n_kv_heads, block.head_dim, dtype
-            ).to(device)
-        self.attn_mask = torch.tril(
-            torch.ones(
-                self.max_seqlen, self.max_seqlen, dtype=torch.bool, device=device
-            )
-        )
-
     def allocate_flash_kv_cache(
         self,
         batch_size: int,
@@ -520,15 +493,6 @@ class Decoder(nn.Module):
         shared_seq_lens = self.flash_kv_caches[0].seq_lens
         for kv in self.flash_kv_caches[1:]:
             kv.seq_lens = shared_seq_lens
-
-    def deallocate_flash_kv_cache(self):
-        self.flash_kv_caches = None
-
-    def reset_kv_cache(self):
-        for block in self.blocks:
-            if block.attn.kv_cache is not None:
-                block.attn.kv_cache.k_cache.zero_()
-                block.attn.kv_cache.v_cache.zero_()
 
     def deallocate_kv_cache(self):
         for block in self.blocks:
@@ -583,30 +547,6 @@ class Decoder(nn.Module):
             x = block.forward_flash(x, kv_cache, freqs_cis, per_sample_freqs=per_sample)
         self.flash_kv_caches[0].seq_lens[:B] += T
         return self.norm(x)
-
-
-class MetricProjector(nn.Module):
-    def __init__(self, n_metrics=3, d_model=1024):
-        super().__init__()
-        self.projections = nn.ModuleList(
-            [nn.Linear(1, d_model) for _ in range(n_metrics)]
-        )
-        self.dropout = nn.Dropout(0.1)
-
-        # Better initialization for [0,1] inputs
-        for proj in self.projections:
-            nn.init.normal_(proj.weight, mean=0.0, std=0.01)
-            if proj.bias is not None:
-                nn.init.zeros_(proj.bias)
-
-    def forward(self, metrics: Tensor):
-        projections = []
-        for i in range(len(self.projections)):
-            proj = self.projections[i](metrics[:, i : i + 1])
-            proj = self.dropout(proj)
-            projections.append(proj)
-
-        return torch.stack(projections, dim=1)
 
 
 class AudioEmbedding(nn.Module):
@@ -787,76 +727,6 @@ class RQTransformer(nn.Module):
 
         return torch.stack(codes, dim=1)
 
-    def generate_kv(
-        self,
-        backbone_hidden: Tensor,
-        code_0: Tensor,
-        temperature: float | Tensor = 0.7,
-        top_k: int | Tensor = 0,
-        logit_bias: Tensor | None = None,
-    ) -> Tensor:
-        B = backbone_hidden.shape[0]
-        device = backbone_hidden.device
-        dtype = backbone_hidden.dtype
-        Q = self.n_quantizers
-        n_h = self.blocks[0].n_heads
-        h_d = self.blocks[0].head_dim
-        D = n_h * h_d
-        n_layers = len(self.blocks)
-        k_caches = torch.zeros(n_layers, B, Q, n_h, h_d, device=device, dtype=dtype)
-        v_caches = torch.zeros(n_layers, B, Q, n_h, h_d, device=device, dtype=dtype)
-
-        # Prefill positions 0 (backbone) and 1 (code_0)
-        tok0 = self.backbone_proj(backbone_hidden) + self.pos_emb.weight[0]
-        tok1 = self.code_emb.embedding(code_0) + self.pos_emb.weight[1]
-        seq2 = torch.stack([tok0, tok1], dim=1)
-        for li, block in enumerate(self.blocks):
-            h = block.attn_norm(seq2)
-            qkv = block.Wqkv(h).reshape(B, 2, 3, n_h, h_d)
-            q, k, v = qkv.unbind(2)
-            k_caches[li, :, :2] = k
-            v_caches[li, :, :2] = v
-            q = q.transpose(1, 2)
-            k = k.transpose(1, 2)
-            v = v.transpose(1, 2)
-            out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-            out = out.transpose(1, 2).reshape(B, 2, D)
-            seq2 = seq2 + block.out_proj(out)
-            h2 = block.mlp_norm(seq2)
-            seq2 = seq2 + block.w2(F.silu(block.w1(h2)) * block.w3(h2))
-
-        codes = [code_0]
-        # Predict code 1 from position 1 hidden
-        h_out = self.norm(seq2[:, 1])
-        logits = F.linear(h_out, self.head_W[0]).float() / temperature
-        if logit_bias is not None:
-            logits = logits + logit_bias[0]
-        if top_k > 0:
-            v_top, _ = logits.topk(top_k)
-            logits[logits < v_top[:, -1:]] = float("-inf")
-        next_code = torch.multinomial(F.softmax(logits, dim=-1), 1).squeeze(-1)
-        codes.append(next_code)
-
-        # Autoregressive single-token steps
-        for i in range(1, Q - 1):
-            offset = i * self.codebook_size
-            tok = (
-                self.code_emb.embedding(next_code + offset) + self.pos_emb.weight[i + 1]
-            ).unsqueeze(1)
-            for li, block in enumerate(self.blocks):
-                tok = block.forward_kv(tok, k_caches[li], v_caches[li], i + 1)
-            h_out = self.norm(tok[:, 0])
-            logits = F.linear(h_out, self.head_W[i]).float() / temperature
-            if logit_bias is not None:
-                logits = logits + logit_bias[i]
-            if top_k > 0:
-                v_top, _ = logits.topk(top_k)
-                logits[logits < v_top[:, -1:]] = float("-inf")
-            next_code = torch.multinomial(F.softmax(logits, dim=-1), 1).squeeze(-1)
-            codes.append(next_code)
-
-        return torch.stack(codes, dim=1)
-
     def generate_kv_compilable(
         self,
         backbone_hidden: Tensor,
@@ -865,11 +735,11 @@ class RQTransformer(nn.Module):
         logit_bias: Tensor,
         top_k: int = 100,
     ) -> Tensor:
-        """torch.compile-friendly generate_kv: no graph breaks.
+        """torch.compile-friendly: no graph breaks.
 
-        Unlike generate_kv, requires: top_k as Python int (not tensor),
-        logit_bias always provided (use zeros), temperature as tensor.
-        Inlines forward_kv to keep pos as compile-time constants.
+        Requires: top_k as Python int (not tensor), logit_bias always
+        provided (use zeros), temperature as tensor. Inlines forward_kv
+        to keep pos as compile-time constants.
         """
         device = backbone_hidden.device
         dtype = backbone_hidden.dtype
@@ -940,154 +810,6 @@ class RQTransformer(nn.Module):
             codes.append(torch.multinomial(F.softmax(logits, dim=-1), 1).squeeze(-1))
 
         return torch.stack(codes, dim=1)
-
-    def setup_cuda_graph_batched(self, batch_size: int, device, dtype=torch.bfloat16):
-        """Record CUDA graph for batched RQ generation at fixed batch size."""
-        Q = self.n_quantizers
-        self._bgraph_bs = batch_size
-        self._bgraph_hidden = torch.randn(
-            batch_size, self.rq_dim, device=device, dtype=dtype
-        )
-        self._bgraph_code0 = torch.randint(
-            0, self.codebook_size, (batch_size,), device=device
-        )
-        self._bgraph_temp = torch.tensor(0.9, device=device, dtype=torch.float32)
-        self._bgraph_seq = torch.zeros(
-            batch_size, Q, self.rq_dim, device=device, dtype=dtype
-        )
-        self._bgraph_codes = torch.zeros(batch_size, Q, device=device, dtype=torch.long)
-
-        s = torch.cuda.Stream()
-        s.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(s), torch.autocast("cuda", dtype):
-            for _ in range(3):
-                self._batched_graph_body()
-        torch.cuda.current_stream().wait_stream(s)
-        self._bgraph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self._bgraph), torch.autocast("cuda", dtype):
-            self._batched_graph_body()
-
-    def _batched_graph_body(self):
-        Q = self.n_quantizers
-        self._bgraph_bs
-        seq = self._bgraph_seq
-        seq.zero_()
-        seq[:, 0].copy_(
-            self.backbone_proj(self._bgraph_hidden) + self.pos_emb.weight[0]
-        )
-        seq[:, 1].copy_(
-            self.code_emb.embedding(self._bgraph_code0) + self.pos_emb.weight[1]
-        )
-        self._bgraph_codes[:, 0].copy_(self._bgraph_code0)
-
-        for i in range(Q - 1):
-            h = seq[:, :Q]
-            for block in self.blocks:
-                h = block(h)
-            h = self.norm(h)
-            logits_i = F.linear(h[:, i + 1], self.head_W[i]) / self._bgraph_temp
-            probs = F.softmax(logits_i, dim=-1)
-            next_code = torch.multinomial(probs, 1).squeeze(-1)
-            self._bgraph_codes[:, i + 1].copy_(next_code)
-            if i + 2 < Q:
-                offset = (i + 1) * self.codebook_size
-                seq[:, i + 2].copy_(
-                    self.code_emb.embedding(next_code + offset)
-                    + self.pos_emb.weight[i + 2]
-                )
-
-    def generate_batched_graph(
-        self,
-        backbone_hidden: Tensor,
-        code_0: Tensor,
-        temperature: float = 0.9,
-    ) -> Tensor:
-        self._bgraph_hidden.copy_(backbone_hidden)
-        self._bgraph_code0.copy_(code_0)
-        self._bgraph_temp.fill_(temperature)
-        self._bgraph.replay()
-        return self._bgraph_codes.clone()
-
-    def setup_cuda_graph(self, device, dtype=torch.bfloat16, top_k: int = 100):
-        """Record CUDA graphs for each possible Q value (2..n_quantizers)."""
-        Q_max = self.n_quantizers
-        self._graph_top_k = top_k
-        self._graph_backbone_hidden = torch.zeros(
-            1, self.rq_dim, device=device, dtype=dtype
-        )
-        self._graph_code0 = torch.zeros(1, device=device, dtype=torch.long)
-        self._graph_temperature = torch.tensor(0.7, device=device, dtype=torch.float32)
-        self._graph_seq = torch.zeros(1, Q_max, self.rq_dim, device=device, dtype=dtype)
-        self._graph_logit_bias = torch.zeros(
-            Q_max - 1, self.codebook_size, device=device, dtype=torch.float32
-        )
-        self._graph_codes_out = torch.zeros(1, Q_max, device=device, dtype=torch.long)
-        self._cuda_graphs: dict[int, torch.cuda.CUDAGraph] = {}
-
-        saved_Q = self.n_quantizers
-        for Q in range(2, Q_max + 1):
-            self.n_quantizers = Q
-            for _ in range(3):
-                self._generate_graph_body()
-            torch.cuda.synchronize()
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                self._generate_graph_body()
-            self._cuda_graphs[Q] = graph
-        self.n_quantizers = saved_Q
-        self._cuda_graph = self._cuda_graphs[saved_Q]
-
-    def _generate_graph_body(self):
-        Q = self.n_quantizers
-        seq = self._graph_seq
-        seq.zero_()
-        seq[:, 0].copy_(
-            self.backbone_proj(self._graph_backbone_hidden) + self.pos_emb.weight[0]
-        )
-        seq[:, 1].copy_(
-            self.code_emb.embedding(self._graph_code0 + 0 * self.codebook_size)
-            + self.pos_emb.weight[1]
-        )
-        self._graph_codes_out[:, 0].copy_(self._graph_code0)
-
-        for i in range(Q - 1):
-            h = seq[:, :Q]
-            for block in self.blocks:
-                h = block(h)
-            h = self.norm(h)
-            logits_i = F.linear(h[:, i + 1], self.head_W[i])
-            logits_i = logits_i + self._graph_logit_bias[i : i + 1]
-            logits_i = logits_i / self._graph_temperature
-            if self._graph_top_k > 0:
-                v, _ = logits_i.topk(self._graph_top_k)
-                logits_i[logits_i < v[:, -1:]] = float("-inf")
-            probs = F.softmax(logits_i, dim=-1)
-            next_code = torch.multinomial(probs, 1).squeeze(-1)
-            self._graph_codes_out[:, i + 1].copy_(next_code)
-            if i + 2 < Q:
-                offset = (i + 1) * self.codebook_size
-                seq[:, i + 2].copy_(
-                    self.code_emb.embedding(next_code + offset)
-                    + self.pos_emb.weight[i + 2]
-                )
-
-    def generate_cuda_graph(
-        self,
-        backbone_hidden: Tensor,
-        code_0: Tensor,
-        temperature: float = 0.7,
-        logit_bias: Tensor | None = None,
-        n_quantizers: int = 0,
-    ) -> Tensor:
-        Q = n_quantizers if n_quantizers > 0 else self.n_quantizers
-        self._graph_backbone_hidden.copy_(backbone_hidden)
-        self._graph_code0.copy_(code_0)
-        self._graph_temperature.fill_(temperature)
-        self._graph_logit_bias.zero_()
-        if logit_bias is not None:
-            self._graph_logit_bias[: logit_bias.size(0)].copy_(logit_bias)
-        self._cuda_graphs[Q].replay()
-        return self._graph_codes_out[:, :Q].clone()
 
     def setup_cuda_graph_kv(
         self,
@@ -1329,61 +1051,6 @@ class ScalarCondProjector(nn.Module):
         return self.proj(features)
 
 
-def _expand_kv_heads(weight: Tensor, n_kv_heads: int, n_heads: int) -> Tensor:
-    """Repeat GQA KV heads to full MHA. (n_kv * head_dim, d) -> (n_heads * head_dim, d)."""
-    if n_kv_heads == n_heads:
-        return weight
-    repeats = n_heads // n_kv_heads
-    head_dim = weight.shape[0] // n_kv_heads
-    # (n_kv, head_dim, d) -> repeat -> (n_heads, head_dim, d) -> (n_heads * head_dim, d)
-    w = weight.view(n_kv_heads, head_dim, -1)
-    w = w.repeat_interleave(repeats, dim=0)
-    return w.reshape(n_heads * head_dim, -1)
-
-
-def convert_hf_llama_state_dict(
-    hf_sd: dict[str, Tensor],
-    n_heads: int | None = None,
-    n_kv_heads_src: int | None = None,
-) -> dict[str, Tensor]:
-    """Convert HuggingFace LlamaForCausalLM weights to our Vui decoder format.
-    If n_heads != n_kv_heads_src, expands GQA KV weights to full MHA."""
-    sd = {}
-    sd["decoder.norm.weight"] = hf_sd["model.norm.weight"]
-    if "model.embed_tokens.weight" in hf_sd:
-        sd["token_emb.weight"] = hf_sd["model.embed_tokens.weight"]
-    expand = n_heads and n_kv_heads_src and n_kv_heads_src != n_heads
-
-    i = 0
-    while f"model.layers.{i}.self_attn.q_proj.weight" in hf_sd:
-        prefix_hf = f"model.layers.{i}"
-        prefix_ours = f"decoder.blocks.{i}"
-
-        q = hf_sd[f"{prefix_hf}.self_attn.q_proj.weight"]
-        k = hf_sd[f"{prefix_hf}.self_attn.k_proj.weight"]
-        v = hf_sd[f"{prefix_hf}.self_attn.v_proj.weight"]
-        if expand:
-            k = _expand_kv_heads(k, n_kv_heads_src, n_heads)
-            v = _expand_kv_heads(v, n_kv_heads_src, n_heads)
-        sd[f"{prefix_ours}.attn.Wqkv.weight"] = torch.cat([q, k, v], dim=0)
-
-        sd[f"{prefix_ours}.attn.out_proj.weight"] = hf_sd[
-            f"{prefix_hf}.self_attn.o_proj.weight"
-        ]
-        sd[f"{prefix_ours}.mlp.w1.weight"] = hf_sd[f"{prefix_hf}.mlp.gate_proj.weight"]
-        sd[f"{prefix_ours}.mlp.w3.weight"] = hf_sd[f"{prefix_hf}.mlp.up_proj.weight"]
-        sd[f"{prefix_ours}.mlp.w2.weight"] = hf_sd[f"{prefix_hf}.mlp.down_proj.weight"]
-        sd[f"{prefix_ours}.attn_norm.weight"] = hf_sd[
-            f"{prefix_hf}.input_layernorm.weight"
-        ]
-        sd[f"{prefix_ours}.mlp_norm.weight"] = hf_sd[
-            f"{prefix_hf}.post_attention_layernorm.weight"
-        ]
-        i += 1
-
-    return sd
-
-
 class Vui(nn.Module):
     VUI2 = "vui-nano.safetensors"
     # Legacy vui1 100M checkpoints (also on the same HF repo)
@@ -1552,32 +1219,6 @@ class Vui(nn.Module):
         return model
 
     @staticmethod
-    def from_hf_llama(repo_id: str, config: Config, n_kv_heads_src: int | None = None):
-        """Load decoder + text embedding weights from a HuggingFace LlamaForCausalLM.
-        n_kv_heads_src: KV heads in the source model (for GQA->MHA expansion).
-        Auto-detected from HF config if not provided."""
-        from huggingface_hub import hf_hub_download
-        from safetensors.torch import load_file
-
-        if n_kv_heads_src is None:
-            from transformers import AutoConfig
-
-            hf_cfg = AutoConfig.from_pretrained(repo_id)
-            n_kv_heads_src = getattr(hf_cfg, "num_key_value_heads", None)
-
-        path = hf_hub_download(repo_id, "model.safetensors")
-        hf_sd = load_file(path)
-        cfg = config.model
-        sd = convert_hf_llama_state_dict(
-            hf_sd,
-            n_heads=cfg.n_heads,
-            n_kv_heads_src=n_kv_heads_src,
-        )
-        model = Vui(config)
-        load_what_you_can(sd, model)
-        return model
-
-    @staticmethod
     def from_pretrained_inf(
         checkpoint_path: str | dict,
         **config_kwargs,
@@ -1660,9 +1301,6 @@ class Vui(nn.Module):
 
     def embed_audio(self, codes: Tensor) -> Tensor:
         return self.audio_emb(codes)
-
-    def embed_text(self, token_ids: Tensor) -> Tensor:
-        return self.token_emb(token_ids)
 
     @property
     def device(self):

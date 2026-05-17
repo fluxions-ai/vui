@@ -1,4 +1,5 @@
 import asyncio
+import sys
 import time
 import traceback
 from collections.abc import Coroutine
@@ -12,6 +13,11 @@ _SRV_LOG_DIR.mkdir(exist_ok=True)
 _SRV_LOG_PATH = _SRV_LOG_DIR / "server.log"
 _SRV_LOG_F = None
 
+# ANSI color only when stdout is a real terminal — pipes/files get plain text.
+_USE_COLOR = sys.stdout.isatty()
+_RED = "\033[1;31m" if _USE_COLOR else ""
+_RESET = "\033[0m" if _USE_COLOR else ""
+
 
 def _slog(msg: str) -> None:
     global _SRV_LOG_F
@@ -24,6 +30,13 @@ def _slog(msg: str) -> None:
             f"\n--- server start {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n"
         )
     _SRV_LOG_F.write(line + "\n")
+
+
+def _warn(msg: str) -> None:
+    """Print a warning in red (to TTY) and mirror to server.log uncolored."""
+    print(f"{_RED}{msg}{_RESET}", flush=True)
+    if _SRV_LOG_F is not None:
+        _SRV_LOG_F.write(msg + "\n")
 
 
 def _spawn(coro: Coroutine, name: str) -> asyncio.Task:

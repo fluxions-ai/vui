@@ -28,24 +28,28 @@ ASR_MODELS = {
     "moonshine.medium": ("moonshine", {"arch": 5}),
     "fwhisper.distil-small.en": (
         "fwhisper",
-        {"model": "distil-small.en", "device": "cuda"},
+        {"model": "distil-small.en"},
     ),
-    "fwhisper.small.en": ("fwhisper", {"model": "small.en", "device": "cuda"}),
+    "fwhisper.small.en": ("fwhisper", {"model": "small.en"}),
     "fwhisper.distil-medium.en": (
         "fwhisper",
-        {"model": "distil-medium.en", "device": "cuda"},
+        {"model": "distil-medium.en"},
     ),
-    "fwhisper.medium.en": ("fwhisper", {"model": "medium.en", "device": "cuda"}),
+    "fwhisper.medium.en": ("fwhisper", {"model": "medium.en"}),
     "fwhisper.distil-large-v3": (
         "fwhisper",
-        {"model": "distil-large-v3", "device": "cuda"},
+        {"model": "distil-large-v3"},
     ),
-    "fwhisper.turbo": ("fwhisper", {"model": "turbo", "device": "cuda"}),
+    "fwhisper.turbo": ("fwhisper", {"model": "turbo"}),
     "mlx-whisper.small": ("mlx_whisper", {"model": "small"}),
     "mlx-whisper.turbo": ("mlx_whisper", {"model": "turbo"}),
 }
 
-DEFAULT_ASR_MODEL = "fwhisper.distil-small.en"
+import platform as _platform
+import sys as _sys
+
+_IS_APPLE_SILICON = _sys.platform == "darwin" and _platform.machine() == "arm64"
+DEFAULT_ASR_MODEL = "moonshine.small" if _IS_APPLE_SILICON else "fwhisper.distil-small.en"
 
 
 def _build_backend(model_key: str | None = None):
@@ -77,8 +81,10 @@ def asr_process(
     # Ignore SIGINT — main process handles Ctrl+C and sends `shutdown` cmd.
     # Without this the worker dumps a multiprocessing traceback on every quit.
     import signal
+    import threading
 
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     # Allow model_arch kwarg to seed Moonshine env var if env not explicitly set
     os.environ.setdefault("VUI_MOONSHINE_ARCH", str(model_arch))
@@ -102,12 +108,14 @@ def asr_process(
 
     def _drain_vad():
         nonlocal vad_chunks, vad_audio_signalled
+        drained = 0
         while True:
             try:
                 audio = vad_queue.get_nowait()
             except Empty:
                 break
             vad_chunks += 1
+            drained += 1
             if not vad_audio_signalled:
                 vad_audio_signalled = True
                 print("[ASR] First VAD audio chunk received — mic pipeline live")
@@ -122,13 +130,16 @@ def asr_process(
                     result_queue.put({"type": "vad_stop"})
             except Exception:
                 traceback.print_exc()
+            # Yield GIL periodically so other threads (TTS) can run
+            if drained % 4 == 0:
+                time.sleep(0)
 
     while True:
         if vad_enabled:
             _drain_vad()
 
         try:
-            msg = cmd_queue.get(timeout=0.01)
+            msg = cmd_queue.get(timeout=0.05)
         except Empty:
             continue
         except Exception:

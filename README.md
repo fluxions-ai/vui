@@ -208,7 +208,7 @@ UI controls, supported LLM/ASR models, and how to point at a custom (remote vLLM
 
 ### ASR: Whisper or Moonshine
 
-Two ASR families ship in the box, switchable live from the UI dropdown. The default is **`fwhisper.distil-small.en`** (faster-whisper, GPU) for English; switch to **[Moonshine](https://github.com/usefulsensors/moonshine)** (ONNX, CPU) to keep ASR off the GPU. Full backend matrix and tuning levers: [`docs/configuration.md`](docs/configuration.md#asr-models).
+Two ASR families ship in the box, switchable live from the UI dropdown. The default is **`fwhisper.distil-small.en`** (faster-whisper, GPU) for English; switch to **[Moonshine](https://github.com/moonshine-ai/moonshine)** (ONNX, CPU) to keep ASR off the GPU. Full backend matrix and tuning levers: [`docs/configuration.md`](docs/configuration.md#asr-models).
 
 ## Realtime API + voice-note endpoint
 
@@ -329,7 +329,7 @@ For Docker, add `VUI_TELEMETRY=0` to the `vui-stream` service environment in `do
 - [Qwen3-TTS-Tokenizer](https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz) — Alibaba
 - [Whisper](https://github.com/openai/whisper) — OpenAI
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
-- [Moonshine](https://github.com/usefulsensors/moonshine) — Useful Sensors (CPU-streaming ASR option)
+- [Moonshine](https://github.com/moonshine-ai/moonshine) — Moonshine AI (CPU-streaming ASR option)
 - [Silero VAD](https://github.com/snakers4/silero-vad)
 - [aiortc](https://github.com/aiortc/aiortc)
 - [Ollama](https://ollama.com) — local LLM runtime (default backend for the assistant + optional Anthropic-compatible endpoint for the task server)

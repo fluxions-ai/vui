@@ -344,7 +344,7 @@ class FWhisperBackend(ASRBackend):
     def __init__(
         self,
         model: str = "distil-small.en",
-        device: str = "cuda",
+        device: str | None = None,
         compute_type: str | None = None,
         interim_every_s: float = 0.5,
         interim_window_s: float = 4.0,
@@ -352,6 +352,9 @@ class FWhisperBackend(ASRBackend):
     ):
         from faster_whisper import WhisperModel
 
+        if device is None:
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         if compute_type is None:
             compute_type = "float16" if device == "cuda" else "int8"
         t0 = time.perf_counter()

@@ -95,6 +95,16 @@ async def handle(ctx: "ThoughtsStream", **args) -> None:
     srv.session.settings["wps_score"] = new
     _slog(f"[set_speech_rate] wps_score {current} -> {new} ({direction})")
 
+    # cond_bias is fixed at prompt-prefill; push set_cond so the change
+    # applies to text generated from here on (past KV stays at old wps).
+    srv.tts_cmd_queue.put(
+        {
+            "cmd": "set_cond",
+            "wps": new,
+            "sq": srv.session.settings.get("sq_scores"),
+        }
+    )
+
     # Push to the UI so the slider reflects the new value.
     ws = srv.session.ws
     if ws and not ws.closed:

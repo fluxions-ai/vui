@@ -133,10 +133,11 @@ class ThoughtsStream:
         remote_caps = getattr(self.srv, "_task_server_capabilities", []) or []
         all_caps = _LOCAL_CAPABILITIES + list(remote_caps)
         cap_block = "\n".join(f"- {c}" for c in all_caps)
+        task_server_available = getattr(self.srv, "_task_server_available", True)
         return _THOUGHTS_PREAMBLE.format(
             capabilities=cap_block,
             memories=mem_block,
-            tool_rules=tools_registry.rules_block(),
+            tool_rules=tools_registry.rules_block(task_server_available),
         )
 
     def _build_tasks_context(self) -> str | None:
@@ -234,9 +235,10 @@ class ThoughtsStream:
             messages.append({"role": "user", "content": "[evaluate]"})
 
             stats: dict = {}
+            task_server_available = getattr(self.srv, "_task_server_available", True)
             res = await get_backend().complete(
                 messages,
-                tools=tools_registry.tools_list(),
+                tools=tools_registry.tools_list(task_server_available),
                 temperature=0.0,
                 stats=stats,
             )

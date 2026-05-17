@@ -31,7 +31,7 @@ class KVCache:
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-5):
+    def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.weight = mx.ones((dim,))
         self.eps = eps
@@ -124,11 +124,11 @@ class LlamaMLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, d_model, n_heads, n_kv_heads, intermediate_size=None):
+    def __init__(self, d_model, n_heads, n_kv_heads, intermediate_size=None, norm_eps=1e-5):
         super().__init__()
-        self.attn_norm = RMSNorm(d_model)
+        self.attn_norm = RMSNorm(d_model, eps=norm_eps)
         self.attn = MHA(d_model, n_heads, n_kv_heads)
-        self.mlp_norm = RMSNorm(d_model)
+        self.mlp_norm = RMSNorm(d_model, eps=norm_eps)
         self.mlp = LlamaMLP(d_model, intermediate_size)
 
     def __call__(self, x, rope, cache=None):
@@ -156,7 +156,7 @@ class Decoder(nn.Module):
             Block(d_model, n_heads, n_kv_heads, intermediate_size)
             for _ in range(n_layers)
         ]
-        self.norm = RMSNorm(d_model)
+        self.norm = RMSNorm(d_model, eps=1e-5)
         self.rope = RoPE(d_model // n_heads, max_seqlen, rope_theta)
         self.kv_caches: list[KVCache] = []
 
@@ -256,6 +256,25 @@ class RQBlock(nn.Module):
         h = self.mlp_norm(x)
         x = x + self.w2(nn.silu(self.w1(h)) * self.w3(h))
         return x, (k, v)
+
+    def forward_kv(self, x, k_cache, v_cache, pos):
+        """Single-token forward with pre-allocated KV cache. pos = current write position."""
+        B = x.shape[0]
+        h = self.attn_norm(x)
+        qkv = self.Wqkv(h).reshape(B, 1, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+        # Write into pre-allocated cache
+        k_cache[:, :, pos:pos+1, :] = k.transpose(0, 2, 1, 3)
+        v_cache[:, :, pos:pos+1, :] = v.transpose(0, 2, 1, 3)
+        q = q.transpose(0, 2, 1, 3)
+        k_all = k_cache[:, :, :pos+1, :]
+        v_all = v_cache[:, :, :pos+1, :]
+        out = mx.fast.scaled_dot_product_attention(q, k_all, v_all, scale=self.scale, mask=None)
+        out = out.transpose(0, 2, 1, 3).reshape(B, 1, -1)
+        x = x + self.out_proj(out)
+        h = self.mlp_norm(x)
+        x = x + self.w2(nn.silu(self.w1(h)) * self.w3(h))
+        return x
 
 
 class RQTransformer(nn.Module):

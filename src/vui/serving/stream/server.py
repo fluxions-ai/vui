@@ -256,6 +256,13 @@ DEFAULT_SETTINGS = {
     "vad_stop_secs": 0.3,  # silero silence-to-stop. Lower = snappier.
     "asr_settle_s": 0.12,  # post vad_stop wait for last fwhisper interim.
     "trailing_off_delay": 0.0,  # extra wait when ASR text doesn't end in .?!
+    # When True, on stable ASR partials kick off a full streaming LLM
+    # generation (not just a 1-token prefill). If the committed transcript
+    # matches the partial we generated for, voice_respond skips the LLM
+    # stream and pumps the buffered reply straight into TTS. Burns compute
+    # on speculations that get thrown away, in exchange for near-zero
+    # LLM TTFB on clean utterances.
+    "speculative_reply": False,
 }
 
 
@@ -293,11 +300,20 @@ class StreamServer:
         self.asr_model_arch = asr_model_arch
         self.session = SessionState()
 
-        self.tts_cmd_queue = Queue()
-        self.tts_audio_queue = Queue()
-        self.asr_cmd_queue = Queue()
-        self.asr_result_queue = Queue()
-        self.vad_queue = Queue()
+        if IS_APPLE_SILICON:
+            # Threads: use stdlib queue (no pickle overhead, no OS-level locks)
+            import queue as _queue
+            self.tts_cmd_queue = _queue.Queue()
+            self.tts_audio_queue = _queue.Queue()
+            self.asr_cmd_queue = _queue.Queue()
+            self.asr_result_queue = _queue.Queue()
+            self.vad_queue = _queue.Queue()
+        else:
+            self.tts_cmd_queue = Queue()
+            self.tts_audio_queue = Queue()
+            self.asr_cmd_queue = Queue()
+            self.asr_result_queue = Queue()
+            self.vad_queue = Queue()
 
         self.tts_proc: Process | None = None
         self.asr_proc: Process | None = None
@@ -355,6 +371,16 @@ class StreamServer:
         # serialise on Ollama's KV cache, and waste compute warming a
         # transcript the user has already revised past.
         self._prefill_inflight: bool = False
+        # Speculative full-reply generation. _spec_reply_for_text is the
+        # ASR partial used as input; _spec_reply is the buffered text
+        # streamed back so far; _spec_task is the in-flight asyncio task
+        # so a superseding partial can cancel it cleanly. _spec_reply_done
+        # is set once streaming completes (so consumers know whether the
+        # buffer is final or still growing).
+        self._spec_reply_for_text: str = ""
+        self._spec_reply: str = ""
+        self._spec_reply_done: bool = False
+        self._spec_task: asyncio.Task | None = None
         self._last_transcription: str | None = None
         self._last_codes_final_n = 0
         self._codes_final_event = asyncio.Event()
@@ -467,33 +493,82 @@ class StreamServer:
     def start_workers(self):
         import multiprocessing
 
-        self.tts_cancel_event = multiprocessing.Event()
+        if IS_APPLE_SILICON:
+            import threading
+            self.tts_cancel_event = threading.Event()
+        else:
+            self.tts_cancel_event = multiprocessing.Event()
         print("Starting worker processes...")
-        self.tts_proc = Process(
-            target=tts_process,
-            args=(
-                self.tts_cmd_queue,
-                self.tts_audio_queue,
-                self.checkpoint_path,
-                self.tts_cancel_event,
-            ),
-            daemon=False,
-        )
-        self.asr_proc = Process(
-            target=asr_process,
-            args=(
-                self.asr_cmd_queue,
-                self.asr_result_queue,
-                self.vad_queue,
-                self.asr_model_arch,
-            ),
-            daemon=True,
-        )
-        self.tts_proc.start()
-        self.asr_proc.start()
-        print(
-            f"Workers started: TTS(pid={self.tts_proc.pid}), ASR(pid={self.asr_proc.pid})"
-        )
+
+        if IS_APPLE_SILICON:
+            # Apple Silicon: run workers as threads in one process to avoid
+            # Metal GPU deadlocks between MLX (TTS) and torch (ASR/VAD)
+            # in separate spawned subprocesses.
+            # Start TTS first and wait for it to finish loading torch models
+            # before starting ASR (both use torch, GIL contention blocks loading).
+            import threading
+
+            self.tts_proc = threading.Thread(
+                target=tts_process,
+                args=(
+                    self.tts_cmd_queue,
+                    self.tts_audio_queue,
+                    self.checkpoint_path,
+                    self.tts_cancel_event,
+                ),
+                daemon=True,
+            )
+            self.tts_proc.start()
+            # Wait for TTS to finish loading (all torch models loaded at init)
+            try:
+                resp = self.tts_audio_queue.get(timeout=120)
+                if resp.get("type") == "ready":
+                    self.tts_ready = True
+                    self._tts_ready = True
+                    print("[main] TTS worker ready")
+            except Exception as e:
+                print(f"[main] TTS startup timeout: {e}")
+
+            self.asr_proc = threading.Thread(
+                target=asr_process,
+                args=(
+                    self.asr_cmd_queue,
+                    self.asr_result_queue,
+                    self.vad_queue,
+                    self.asr_model_arch,
+                ),
+                daemon=True,
+            )
+            self.asr_proc.start()
+            print(
+                f"Workers started as threads (Apple Silicon single-process mode)"
+            )
+        else:
+            self.tts_proc = Process(
+                target=tts_process,
+                args=(
+                    self.tts_cmd_queue,
+                    self.tts_audio_queue,
+                    self.checkpoint_path,
+                    self.tts_cancel_event,
+                ),
+                daemon=False,
+            )
+            self.asr_proc = Process(
+                target=asr_process,
+                args=(
+                    self.asr_cmd_queue,
+                    self.asr_result_queue,
+                    self.vad_queue,
+                    self.asr_model_arch,
+                ),
+                daemon=True,
+            )
+            self.tts_proc.start()
+            self.asr_proc.start()
+            print(
+                f"Workers started: TTS(pid={self.tts_proc.pid}), ASR(pid={self.asr_proc.pid})"
+            )
 
     def stop_workers(self):
         for q in [self.tts_cmd_queue, self.asr_cmd_queue]:
@@ -504,7 +579,7 @@ class StreamServer:
         for p in [self.tts_proc, self.asr_proc]:
             if p is not None and p.is_alive():
                 p.join(timeout=5)
-                if p.is_alive():
+                if p.is_alive() and hasattr(p, "terminate"):
                     p.terminate()
 
     def _derive_worker_states(self) -> dict[str, str]:
@@ -669,6 +744,12 @@ class StreamServer:
         self._last_codes_final_n = 0
         self._codes_final_event.clear()
         self._last_prefill_text = ""
+        self._spec_reply_for_text = ""
+        self._spec_reply = ""
+        self._spec_reply_done = False
+        if self._spec_task and not self._spec_task.done():
+            self._spec_task.cancel()
+        self._spec_task = None
         self._user_chunks_prefilled = 0
         self._last_user_chunk_text = ""
         self._last_user_chunk_t = 0.0

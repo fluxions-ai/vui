@@ -19,6 +19,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[5]
 _TOOLS_REL = "src/vui/serving/stream/tools"
 
 
+# Codegen runs through the claude-task server, so this tool is dropped when
+# the server is unreachable.
+REQUIRES_TASK_SERVER = True
+
+
 SCHEMA = {
     "type": "function",
     "function": {
