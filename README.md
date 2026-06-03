@@ -11,13 +11,11 @@
   <a href="https://discord.fluxions.ai"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white&style=for-the-badge" alt="Discord"></a>
 </p>
 
+https://github.com/user-attachments/assets/d04de946-3b39-4fc1-bbba-5b1c5ba373ee
+
 📖 **[Launch blog post](https://fluxions.ai/blog/vui-launch)** — design notes, demos, and what's next.
 
 Vui is a real-time voice assistant: speak into your mic, the model transcribes, runs a local LLM, and streams a TTS reply back — all from a single Python server. Built around **Vui Nano**, a 300M speech transformer based on the Qwen3 TTS. Trained on conversational speech with breaths, laughter, hesitations, and multi-speaker dialogue.
-
-<p align="center">
-  <video src="https://raw.githubusercontent.com/fluxions-ai/vui/main/assets/bestdemo3.mp4" controls width="564"></video>
-</p>
 
 ## Features
 
