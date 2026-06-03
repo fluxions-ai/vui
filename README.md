@@ -15,6 +15,10 @@
 
 Vui is a real-time voice assistant: speak into your mic, the model transcribes, runs a local LLM, and streams a TTS reply back — all from a single Python server. Built around **Vui Nano**, a 300M speech transformer based on the Qwen3 TTS. Trained on conversational speech with breaths, laughter, hesitations, and multi-speaker dialogue.
 
+<p align="center">
+  <video src="https://raw.githubusercontent.com/fluxions-ai/vui/main/assets/bestdemo3.mp4" controls width="564"></video>
+</p>
+
 ## Features
 
 - **Vui Nano (300M)** — Llama-style decoder + RQ-Transformer head over the Qwen3-TTS-12Hz codec
