@@ -11,7 +11,9 @@
   <a href="https://discord.fluxions.ai"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white&style=for-the-badge" alt="Discord"></a>
 </p>
 
-https://github.com/user-attachments/assets/d04de946-3b39-4fc1-bbba-5b1c5ba373ee
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/d04de946-3b39-4fc1-bbba-5b1c5ba373ee" controls width="564"></video>
+</p>
 
 📖 **[Launch blog post](https://fluxions.ai/blog/vui-launch)** — design notes, demos, and what's next.
 
