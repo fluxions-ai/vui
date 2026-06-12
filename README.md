@@ -7,13 +7,22 @@
 <p align="center"><em>Pronounced "vooey"</em> (rhymes with <em>Louie</em>) · by <a href="https://fluxions.ai">fluxions.ai</a></p>
 
 <p align="center">
+  <a href="https://fluxions.ai/talk"><img src="https://img.shields.io/badge/%F0%9F%8E%99%EF%B8%8F%20Try%20it%20live-fluxions.ai%2Ftalk-brightgreen?style=for-the-badge" alt="Try it live"></a>
   <a href="https://huggingface.co/fluxions/vui"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Model-yellow?style=for-the-badge" alt="Hugging Face"></a>
   <a href="https://discord.fluxions.ai"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white&style=for-the-badge" alt="Discord"></a>
 </p>
 
+<p align="center"><strong>🎙️ Try it live at <a href="https://fluxions.ai/talk">fluxions.ai/talk</a></strong></p>
+
+<table align="center"><tr><td>
+  <video src="https://github.com/user-attachments/assets/d04de946-3b39-4fc1-bbba-5b1c5ba373ee" controls width="564"></video>
+</td></tr></table>
+
 📖 **[Launch blog post](https://fluxions.ai/blog/vui-launch)** — design notes, demos, and what's next.
 
 Vui is a real-time voice assistant: speak into your mic, the model transcribes, runs a local LLM, and streams a TTS reply back — all from a single Python server. Built around **Vui Nano**, a 300M speech transformer based on the Qwen3 TTS. Trained on conversational speech with breaths, laughter, hesitations, and multi-speaker dialogue.
+
+> **Want production-grade turn-taking and efficient infrastructure at scale?** This repo is the open core; we run a hardened, low-latency version built for scale. Get in touch at [fluxions.ai](https://fluxions.ai).
 
 ## Features
 
