@@ -1,0 +1,34 @@
+# Claude task delegation server. No GPU. uv installs Python.
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    UV_PYTHON_INSTALL_DIR=/opt/python \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    PATH=/opt/venv/bin:/root/.local/bin:$PATH
+
+# Node.js (Claude Code CLI is a Node binary that the SDK shells out to)
+# + uv (installs Python).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates gnupg \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g @anthropic-ai/claude-code \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh
+
+WORKDIR /app
+
+COPY pyproject.toml ./
+COPY src ./src
+
+RUN uv venv --python 3.12 /opt/venv \
+    && uv pip install --no-cache ".[claude]"
+
+EXPOSE 8642
+
+CMD ["python", "-m", "vui.serving.claude_server"]

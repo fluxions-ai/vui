@@ -1,0 +1,39 @@
+# CUDA 13.0 + cuDNN runtime. uv brings its own Python — no apt python needed.
+# Matches the cu130 + torch 2.10 + cp312 flash-attn pre-built wheel.
+FROM nvidia/cuda:13.0.0-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    UV_PYTHON_INSTALL_DIR=/opt/python \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    PATH=/opt/venv/bin:/root/.local/bin:$PATH \
+    HF_HOME=/cache/huggingface
+
+# Bare-minimum runtime libs: ffmpeg + libsndfile for audio I/O, ca-certs + curl
+# for downloads.  uv installs Python on its own.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg libsndfile1 ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh
+
+WORKDIR /app
+
+COPY pyproject.toml ./
+COPY src ./src
+
+# uv installs Python 3.12 + the project + flash-attn pre-built wheel
+# (resolved via [tool.uv.sources] — pip can't do this).
+# nvidia-cublas-cu12 + nvidia-cudnn-cu12 ship the CUDA 12 runtime libs that
+# CTranslate2 (faster-whisper) links against — we run on a CUDA 13 base
+# image (for the flash-attn cu130 wheel), so they coexist via LD_LIBRARY_PATH.
+RUN uv venv --python 3.12 /opt/venv \
+    && uv pip install --no-cache ".[cuda]" \
+    && uv pip install --no-cache nvidia-cublas-cu12 nvidia-cudnn-cu12
+
+ENV LD_LIBRARY_PATH=/opt/venv/lib/python3.12/site-packages/nvidia/cublas/lib:/opt/venv/lib/python3.12/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}
+
+EXPOSE 8080
+
+VOLUME ["/cache/huggingface"]
+
+CMD ["python", "-m", "vui.serving.stream"]

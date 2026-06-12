@@ -1,0 +1,123 @@
+# Vui streaming voice assistant — docker-compose.
+#
+# Default: `vui-stream` + `claude-task` start. `vui-stream` uses host
+# networking and points at `http://localhost:11434`, so it talks to whatever
+# Ollama you have on the host (recommended — start with `ollama serve` or
+# your distro's service).
+#
+# Quick start:
+#     ollama pull qwen3.5:4b           # on the HOST
+#     docker compose up -d
+#     open http://localhost:8080
+#
+# Don't have Ollama on the host? Start the bundled containerised one:
+#     docker compose --profile ollama up -d
+#     docker compose exec ollama ollama pull qwen3.5:4b
+#
+# `claude-task` (Gmail / Calendar / web research delegation) starts by
+# default. Without auth (`~/.claude` login or ANTHROPIC_API_KEY) it stays up
+# but task requests fail at runtime; the voice loop is unaffected. See readme.
+
+services:
+  # Optional bundled Ollama. Off by default — assumes the user has Ollama on
+  # the host. Enable with `--profile ollama` if you want it containerised.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: vui-ollama
+    profiles: ["ollama"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  vui-stream:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.stream
+    container_name: vui-stream
+    # Override default CMD to load a local checkpoint instead of fetching
+    # vui-nano.safetensors from huggingface.co/fluxions/vui (not yet published).
+    # Drop this line once the HF repo has the v2 weights.
+    # Path is `<run>/<step>.pt` so `_ckpt_id` parses to `7qx553s3_0060000`
+    # and matches the cached compiled-prompt filenames in `prompts/`.
+    command: ["python", "-m", "vui.serving.stream", "/app/checkpoints/7qx553s3/0060000.pt"]
+    # WebRTC needs the browser to reach the server's media UDP sockets
+    # directly. With bridged networking, aiortc's ICE host candidates
+    # advertise the container's bridge IP and the browser usually can't
+    # reach them — connection stays in "connecting" forever. Host net
+    # avoids the NAT/UDP problem entirely. Trade-off: `ports:` is ignored
+    # and the container shares the host's network namespace, so we just
+    # talk to the host's Ollama at localhost:11434 directly.
+    network_mode: host
+    volumes:
+      # HuggingFace cache so the Qwen codec only downloads once.
+      - hf-cache:/cache/huggingface
+      # Local checkpoint mount (see `command:` above).
+      - ./checkpoints:/app/checkpoints:ro
+      # Persist saved voice prompts across restarts.
+      - ./prompts:/app/prompts
+      # Optional: write conversation logs to host for inspection.
+      - ./debug_dump:/app/debug_dump
+      # Thoughts-stream tools dir — shared rw with claude-task so codegen
+      # writes (via the propose_tool action) land on the host filesystem
+      # and are visible to vui-stream's /tools/reload.
+      - ./src/vui/serving/stream/tools:/app/src/vui/serving/stream/tools
+    environment:
+      # `OLLAMA_URL` is read by llm.py (model-list / pull / MLX detect helpers);
+      # `VUI_OLLAMA_URL` is read by llm_backend.py (the chat/streaming path).
+      # Both must be set — they're separate code paths.
+      # localhost works for both the host Ollama and the optional bundled one
+      # (which publishes :11434 on the host).
+      OLLAMA_URL: "http://localhost:11434"
+      VUI_OLLAMA_URL: "http://localhost:11434"
+      VUI_OLLAMA_MODEL: "qwen3.5:4b"
+      VUI_TASK_SERVER_URL: "http://localhost:8642"
+      # Cap conversation context, in seconds of audio. Budget is shared
+      # between audio (~12.5 tok/s) and text (~31 tok/s headroom).  Default
+      # below fits one full turn (prompt ~10s + user ~30s + 2 min reply)
+      # comfortably, with multi-turn history off (`keep_context=false`).
+      # Trained ceiling is ~240s.
+      VUI_MAX_CONTEXT_SECS: "180"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # Claude task delegation — starts by default. Mounts ~/.claude for auth;
+  # falls back to ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN env vars.
+  # Host networking (matches vui-stream) so the result callback POST to
+  # http://localhost:8080/task_done resolves to vui-stream on the host.
+  # Without it, "localhost" inside this container loops back to itself and
+  # task results never reach the voice server.
+  claude-task:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.claude
+    container_name: vui-claude-task
+    network_mode: host
+    volumes:
+      # Claude Code subscription credentials (after `claude` login on host).
+      - "${HOME}/.claude:/root/.claude:ro"
+      # Thoughts-stream tools dir — same mount as vui-stream so
+      # propose_tool codegen writes show up live on both sides.
+      - ./src/vui/serving/stream/tools:/app/src/vui/serving/stream/tools
+    environment:
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN:-}"
+    restart: unless-stopped
+
+volumes:
+  ollama-models:
+  hf-cache:
