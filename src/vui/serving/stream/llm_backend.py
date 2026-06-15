@@ -540,9 +540,6 @@ class LiteLLMBackend(LLMBackend):
             "stream": stream,
             "max_tokens": max_tokens,
             "temperature": s["temperature"],
-            "top_p": s["top_p"],
-            "presence_penalty": s["presence_penalty"],
-            "drop_params": True,
         }
         if stop:
             body["stop"] = stop

@@ -24,8 +24,8 @@ def test_litellm_body_includes_drop_params():
         stop=None,
     )
     assert body["model"] == "openai/gpt-4o-mini"
-    assert body["drop_params"] is True
     assert body["max_tokens"] == 100
+    assert "presence_penalty" not in body
 
 
 def test_litellm_body_with_tools():
