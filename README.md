@@ -20,9 +20,11 @@
 
 📖 **[Launch blog post](https://fluxions.ai/blog/vui-launch)** — design notes, demos, and what's next.
 
+**Vui** is short for **V**oice **U**ser **I**nterface — the layer that lets you talk to a computer and have it talk back.
+
 Vui is a real-time voice assistant: speak into your mic, the model transcribes, runs a local LLM, and streams a TTS reply back — all from a single Python server. Built around **Vui Nano**, a 300M speech transformer based on the Qwen3 TTS. Trained on conversational speech with breaths, laughter, hesitations, and multi-speaker dialogue.
 
-> **Want production-grade turn-taking and efficient infrastructure at scale?** This repo is the open core; we run a hardened, low-latency version built for scale. Get in touch at [fluxions.ai](https://fluxions.ai).
+> **Want the latest models and production-grade turn-taking?** This repo is the open core. Our [production API](https://fluxions.ai) ships ongoing model updates and a more advanced turn-taking system, on hardened, low-latency infrastructure built for scale. Get in touch at [fluxions.ai](https://fluxions.ai).
 
 ## Features
 
