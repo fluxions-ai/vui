@@ -179,3 +179,9 @@ debug_dump/
 outputs/
 prompts/
 todo.md
+
+# cpu/ inference artifacts (large, generated)
+cpu/*.onnx
+cpu/*.onnx.data
+cpu/*.bin
+cpu/vui_tts
