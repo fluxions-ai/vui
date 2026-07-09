@@ -4,27 +4,31 @@ Standalone C inference engine for VUI TTS. No Python/PyTorch/ONNX at runtime —
 
 ## Quick Start
 
-Everything (sources, build artifacts, weights, prompts) lives in this `cpu/` dir.
-Run these from inside `cpu/`. `.venv` is a symlink to the repo-root venv.
+Build artifacts, weights and prompt caches are written into this `cpu/` dir (all
+gitignored). Run these from inside `cpu/`; `.venv/bin/python` refers to the
+repo-root venv — either symlink it (`ln -s ../.venv .venv`) or use `../.venv/bin/python`.
 
 ```bash
 cd cpu
 
-# Export model to single binary (one-time, needs Python)
-.venv/bin/python export_full.py ../checkpoints/0jiksor5_0100000.pt vui_full.bin
-
-# Prepare voice cloning prompt from any wav (one-time, needs Python; whisper-transcribes + re-encodes)
-.venv/bin/python prepare_prompt.py ~/good_prompt.wav prompt_cache.bin
-
-# OR build a release-voice cache from the OFFICIAL prompt files (exact transcript, pre-encoded
-# codes, official spk token — no whisper, no re-encode). This is how prompt_<voice>_official.bin was made:
-.venv/bin/python prepare_prompt_official.py prompts/maeve.safetensors prompts/maeve.txt prompt_maeve_official.bin ../checkpoints/0jiksor5_0100000.pt
+# Export model to single binary (one-time, needs Python).
+# `vui-nano.safetensors` is the public release checkpoint — it auto-downloads
+# from the fluxions/vui HuggingFace repo on first use. (A local .pt path works too.)
+.venv/bin/python export_full.py vui-nano.safetensors vui_full.bin
 
 # Build C inference (binary lands in cpu/)
 gcc -O3 -march=native -ffast-math -fopenmp -o vui_tts vui_tts.c -lm -lopenblas
 
-# Run (writes output.wav)
+# Run — with no --kv-cache it uses the default (baked-in cond_bias) speaker
+OMP_NUM_THREADS=4 ./vui_tts vui_full.bin --text "Hello world." --output out.wav
+
+# Voice cloning: prepare a prompt cache from any wav (one-time; whisper-transcribes + re-encodes)
+.venv/bin/python prepare_prompt.py ~/good_prompt.wav prompt_cache.bin
 OMP_NUM_THREADS=4 ./vui_tts vui_full.bin --kv-cache prompt_cache.bin --text "Hello world." --output out.wav
+
+# OR build a release-voice cache from OFFICIAL prompt files (exact transcript, pre-encoded
+# codes, official spk token — no whisper, no re-encode). This is how prompt_<voice>_official.bin was made:
+.venv/bin/python prepare_prompt_official.py prompts/maeve.safetensors prompts/maeve.txt prompt_maeve_official.bin vui-nano.safetensors
 
 # Stream to speaker
 OMP_NUM_THREADS=4 ./vui_tts vui_full.bin --kv-cache prompt_cache.bin --text "Hello world." --stream
