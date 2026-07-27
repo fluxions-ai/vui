@@ -22,12 +22,14 @@ COPY pyproject.toml ./
 COPY src ./src
 
 # uv installs Python 3.12 + the project + flash-attn pre-built wheel
-# (resolved via [tool.uv.sources] — pip can't do this).
+# (resolved via [tool.uv.sources] — pip can't do this; x86_64 and aarch64 get
+# different pinned wheels). Where the kernel can't run — e.g. Jetson compute
+# capabilities absent from the wheel — vui.flash_compat uses PyTorch SDPA.
 # nvidia-cublas-cu12 + nvidia-cudnn-cu12 ship the CUDA 12 runtime libs that
 # CTranslate2 (faster-whisper) links against — we run on a CUDA 13 base
 # image (for the flash-attn cu130 wheel), so they coexist via LD_LIBRARY_PATH.
 RUN uv venv --python 3.12 /opt/venv \
-    && uv pip install --no-cache ".[cuda]" \
+    && uv pip install --no-cache "." \
     && uv pip install --no-cache nvidia-cublas-cu12 nvidia-cudnn-cu12
 
 ENV LD_LIBRARY_PATH=/opt/venv/lib/python3.12/site-packages/nvidia/cublas/lib:/opt/venv/lib/python3.12/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}

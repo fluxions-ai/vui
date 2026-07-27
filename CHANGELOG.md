@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **ARM64 Linux: `ModuleNotFoundError: No module named 'flash_attn'`.** Only an
+  x86_64 wheel was pinned, so the TTS worker crashed on the first decode step on
+  ARM hosts. Two changes:
+  - `pyproject.toml` now pins an **aarch64** flash-attn wheel as well
+    (2.8.3 + cu130 + torch 2.11 + cp312), so Grace-Hopper / Grace-Blackwell
+    servers run the real kernel.
+  - New `vui.flash_compat` provides a pure-PyTorch SDPA implementation of
+    `flash_attn_with_kvcache` (same semantics, CUDA-graph safe) for everywhere
+    the kernel can't run: CPU/macOS, and Jetson parts (Orin sm_87, Thor sm_110)
+    whose compute capability isn't built into the aarch64 wheel — the launch
+    failure is caught once and attention falls back for the rest of the process.
+    Force it anywhere with `VUI_ATTN=torch`.
+
+  `docker/Dockerfile.stream` also stopped requesting the non-existent `[cuda]`
+  extra.
+
 ## [1.0.0] - 2026-05-14
 
 First production release. Vui shifts from a standalone TTS model to a full

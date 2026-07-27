@@ -42,6 +42,8 @@ Measured on a running server (`nvidia-smi --query-compute-apps`, Ollama `/api/ps
 
 Backbone arch (from [`readme`](../README.md#vui-nano)): 768 dim, 22 layers, 8 heads → `head_dim = 96`. No GQA — `n_kv_heads = n_heads = 8`.
 
+**Without flash-attn** (Jetson, CPU, or `VUI_ATTN=torch`) [`vui.flash_compat`](../src/vui/flash_compat.py) attends over the *whole* pre-allocated cache each step — masked, so results match, but both cost and the transient attention scores scale with `max_seqlen` rather than with the filled prefix. Cap `max_seq` on the `Engine` there; it buys latency as well as VRAM.
+
 ### ASR worker — measured 0.85 GiB (default)
 
 `distil-small.en` model.bin on disk: 332 MiB.
