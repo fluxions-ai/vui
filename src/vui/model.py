@@ -214,7 +214,7 @@ class MHA(nn.Module):
         If per_sample_freqs=True, freqs_cis is (B, rot_dim, 2) for T=1 decode.
         If cache_batch_idx is provided, maps B query rows to arbitrary KV cache slots.
         """
-        from flash_attn import flash_attn_with_kvcache
+        from vui.flash_compat import flash_attn_with_kvcache
 
         B, T, _ = x.shape
         qkv = self.Wqkv(x)

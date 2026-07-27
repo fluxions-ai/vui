@@ -39,9 +39,9 @@ dependencies = [
     # Claude task delegation server (always installed — `claude_server.py`
     # imports it at module load).
     "claude-agent-sdk>=0.1.70",
-    # CUDA flash-attn — Linux only. Pre-built wheel via [tool.uv.sources].
+    # CUDA flash-attn — Linux. Pre-built wheels (x86_64 + aarch64) via [tool.uv.sources].
     # Install with `uv` (not pip — pip ignores [tool.uv.sources] and tries to source-build).
-    "flash-attn ; sys_platform == 'linux'",
+    "flash-attn ; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
     # ctranslate2 (faster-whisper) dlopens libcublas.so.12 at import time;
     # torch brings cu13. This supplies the cu12 ABI ctranslate2 needs.
     "nvidia-cublas-cu12 ; sys_platform == 'linux'",
@@ -59,9 +59,18 @@ moonshine = [
 ]
 
 [tool.uv.sources]
-# Pre-built wheel from a community mirror — avoids the (slow + fragile) source
-# build of flash-attn. Pinned to cu130 + torch 2.10 + cp312.
-flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.12/flash_attn-2.7.4%2Bcu130torch2.10-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'" }
+# Pre-built wheels from a community mirror — avoids the (slow + fragile) source
+# build of flash-attn. Both are cu130 + cp312.
+#
+# aarch64 (Grace-Hopper / Grace-Blackwell) gets flash-attn 2.8.3 — the only
+# cu130 build published for ARM, and it matches our torch 2.11 pin exactly.
+# Its kernels cover sm_80/90/100/120 with no PTX fallback, so Jetson parts
+# (Orin sm_87, Thor sm_110) import it fine but fail at launch; vui.flash_compat
+# catches that and switches to the PyTorch SDPA path.
+flash-attn = [
+    { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.12/flash_attn-2.7.4%2Bcu130torch2.10-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.22/flash_attn-2.8.3%2Bcu130torch2.11-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

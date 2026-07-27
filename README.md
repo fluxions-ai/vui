@@ -119,9 +119,15 @@ brew install ffmpeg                         # macOS
 Then:
 
 ```sh
-uv sync                  # base + flash-attn pre-built wheel on Linux
+uv sync                  # base + flash-attn pre-built wheel on Linux (x86_64 + aarch64)
 uv sync --extra mlx      # add for Apple Silicon
 ```
+
+Pre-built flash-attn wheels are pinned for Linux x86_64 and aarch64, so ARM
+servers (Grace-Hopper, Grace-Blackwell) get the real kernel. Where it can't run
+— Jetson parts, whose compute capability isn't in the wheel, plus CPU/macOS —
+`vui.flash_compat` transparently switches to a pure-PyTorch SDPA kernel: same
+outputs, slower decode. `VUI_ATTN=torch` forces that path anywhere.
 
 Install [Ollama](https://ollama.com), start it, pull a model, then run the streaming server (defaults to `:8080`):
 ```sh
@@ -298,7 +304,7 @@ For long voice prompts (>15s) you need proper multi-segment chunking — `vui.pr
 ## Hardware
 
 Streaming server and `demo.py` both run on either:
-- **NVIDIA GPU + Linux** — ~**12 GB VRAM** for the full stack (TTS + ASR + Ollama LLM, 4090 / H100 tested), drops to **~8 GB** if you switch to a `moonshine.*` (CPU) ASR backend. CUDA 12.x, flash-attn installed.
+- **NVIDIA GPU + Linux** — ~**12 GB VRAM** for the full stack (TTS + ASR + Ollama LLM, 4090 / H100 tested), drops to **~8 GB** if you switch to a `moonshine.*` (CPU) ASR backend. CUDA 12.x, flash-attn installed. ARM64 servers (GH200 / GB200) work too; Jetson parts fall back to the slower PyTorch SDPA attention automatically.
 - **Apple Silicon Mac** — M1/M2/M3/M4, MLX backend (auto-detected, no flash-attn required).
 
 Full breakdown — measured per-component VRAM, ASR latency/VRAM per backend, KV-cache math, and tuning levers — is in [`docs/memory-budget.md`](docs/memory-budget.md).
