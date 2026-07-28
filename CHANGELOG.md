@@ -22,8 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     dies in `scatter_add_` with a device-side assert. Measured by forcing
     `VUI_DTYPE=fp16` on a 4090; the weights fit fine (max |w| ~16), so it's
     activations. Emulated bf16 was initially replaced with fp32 on the
-    assumption that "no hardware support" meant "slow path", but a real T4
-    measured it ~20% *faster* than fp32 at no cost in accuracy, so bf16 it is.
+    assumption that "no hardware support" meant "slow path", but measured on a
+    real T4 it is ~20% *faster* than fp32 at no cost in accuracy, so bf16 it
+    is. Measured across an RTX 4090 and a Tesla T4, rendering a fixed line and
+    scoring WER with Moonshine: bf16+flash 0.000 at 8.6x realtime and
+    bf16+SDPA 0.042 at 3.2x on the 4090; bf16+SDPA 0.000 at 1.25x and
+    fp32+SDPA 0.125 at 1.02x on the T4.
   - `vui.flash_compat` checks compute capability on the first call and goes
     straight to SDPA below 8.0, instead of letting a kernel launch fail and
     catching the error. The launch-error catch stays as a backstop for Jetson,
@@ -50,17 +54,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   torch/GPU kernel compatibility across faked compute capabilities (Volta
   through Blackwell), so decisions that would otherwise need a shelf of old
   GPUs are covered on any box.
-- `tests/hardware_matrix.py` — renders the same line under each dtype and
-  attention combination on a real GPU, then transcribes each with Moonshine and
-  scores WER against the input. Statistics alone don't catch garbage audio.
-  On an RTX 4090: bf16+flash WER 0.000 at 8.6x realtime, bf16+SDPA 0.042 at
-  3.2x, fp32+SDPA 0.000 at 1.3x. On a Tesla T4 (via `tests/modal_t4.py`):
-  bf16+SDPA WER 0.000 at 1.25x, fp32+SDPA 0.125 at 1.02x. So the SDPA fallback
-  is sound and a T4 runs just above realtime.
-- `tests/modal_t4.py` — runs the doctor, the unit tests and the render matrix
-  on a rented Turing T4 via Modal, from an image with no ffmpeg, so the
-  pre-Ampere paths and the rootless ffmpeg fetch are exercised on hardware
-  rather than simulated.
 - `[dependency-groups] dev` with pytest and pytest-asyncio, plus
   `asyncio_mode = "auto"`. The async backend tests previously needed a plugin
   nothing declared, so a fresh checkout collected 11 errors.
