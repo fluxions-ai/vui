@@ -173,7 +173,7 @@ Measured on one RTX 4090, rendering the same line (WER via Moonshine against the
 | fp32 + SDPA | WER 0.000 · RTF 1.3× | WER 0.125 · RTF 1.02× |
 | fp16 | crashes | crashes |
 
-So the SDPA fallback is sound, and a T4 runs just above realtime. `tests/hardware_matrix.py` reproduces this on any CUDA box; `tests/modal_t4.py` runs the whole thing on a rented T4 via Modal.
+So the SDPA fallback is sound, and a T4 runs just above realtime. Figures are one fixed-seed render per configuration — reproducible, but the RTF numbers carry more weight than the WER ones.
 
 (The script also reports waveform correlation against the baseline. Expect it to be low: sampling is stochastic and any numerical difference changes which token is drawn, after which the waveforms diverge entirely. WER is the metric that means something here.)
 
