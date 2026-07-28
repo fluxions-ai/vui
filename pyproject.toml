@@ -39,15 +39,24 @@ dependencies = [
     # Claude task delegation server (always installed — `claude_server.py`
     # imports it at module load).
     "claude-agent-sdk>=0.1.70",
-    # CUDA flash-attn — Linux. Pre-built wheels (x86_64 + aarch64) via [tool.uv.sources].
-    # Install with `uv` (not pip — pip ignores [tool.uv.sources] and tries to source-build).
-    "flash-attn ; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+    # NOTE: flash-attn is deliberately NOT here — see the `flash` extra below.
     # ctranslate2 (faster-whisper) dlopens libcublas.so.12 at import time;
     # torch brings cu13. This supplies the cu12 ABI ctranslate2 needs.
     "nvidia-cublas-cu12 ; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
+# FlashAttention-2. Optional because the pinned wheels carry cubins for
+# sm_80/90/100/120 and no PTX, so on anything older (Turing sm_75, Volta
+# sm_70) importing it succeeds and the first decode step dies with "no kernel
+# image is available". `vui.flash_compat` covers that with a pure-PyTorch SDPA
+# path, so the kernel is a speedup, not a requirement.
+#
+# `install.sh` adds this extra automatically when it detects compute
+# capability >= 8.0. By hand: `uv sync --extra flash`.
+flash = [
+    "flash-attn ; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+]
 mlx = [
     "mlx>=0.18",
     "mlx-whisper>=0.4",
@@ -57,6 +66,18 @@ mlx = [
 moonshine = [
     "moonshine-voice",
 ]
+
+[tool.uv]
+# Pick the CUDA build of torch from the installed driver, rather than always
+# taking the newest one. This is what lets `uv sync` work on a range of cards
+# without anyone passing flags.
+#
+# It resolves from the *driver version*, though — not the compute capability —
+# so it can still choose a build with no kernels for a very old card. Pre-Turing
+# (Volta sm_70, Pascal) needs `UV_TORCH_BACKEND=cu126` explicitly; install.sh
+# detects that case and sets it, and `python -m vui.doctor` reports it if the
+# torch you ended up with has no kernels for your GPU.
+torch-backend = "auto"
 
 [tool.uv.sources]
 # Pre-built wheels from a community mirror — avoids the (slow + fragile) source

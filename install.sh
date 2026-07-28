@@ -174,6 +174,56 @@ if [[ -z "$MODE" ]]; then
     fi
 fi
 
+# -------------------------------------------------------------------- GPU
+#
+# Two things depend on the card's compute capability:
+#
+#   * which CUDA build of torch to install — the cu130 wheels carry no sm_70
+#     kernels, so Volta needs a cu12 build;
+#   * whether to install flash-attn at all — its wheels are sm_80+ with no PTX,
+#     and vui.flash_compat falls back to SDPA below that anyway.
+#
+# `nvidia-smi --query-gpu=compute_cap` needs no root and no CUDA toolkit.
+
+GPU_CAP=""      # e.g. "8.6"; empty when there's no NVIDIA GPU
+
+detect_gpu() {
+    command -v nvidia-smi >/dev/null 2>&1 || return 0
+    GPU_CAP="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+               | head -1 | tr -d '[:space:]')"
+    [[ -n "$GPU_CAP" ]] && log "GPU compute capability: $GPU_CAP"
+    return 0
+}
+
+# Numeric compare on "major.minor" without bc.
+cap_at_least() {
+    local want="$1" have="${GPU_CAP:-0.0}"
+    [[ -z "$GPU_CAP" ]] && return 1
+    local hw_major="${have%%.*}" hw_minor="${have##*.}"
+    local wt_major="${want%%.*}" wt_minor="${want##*.}"
+    (( hw_major > wt_major )) && return 0
+    (( hw_major < wt_major )) && return 1
+    (( hw_minor >= wt_minor ))
+}
+
+# pyproject.toml sets `[tool.uv] torch-backend = "auto"`, so uv already picks a
+# CUDA build per the installed driver — nothing to do in the common case.
+#
+# What `auto` can't see is the compute capability: a Volta box with a current
+# driver resolves to a recent build that has no sm_70 kernels. That's the one
+# case worth overriding here.
+resolve_torch_backend() {
+    [[ -n "${UV_TORCH_BACKEND:-}" ]] && return 0   # respect an explicit choice
+    [[ -z "$GPU_CAP" ]] && return 0
+    cap_at_least 7.5 && return 0
+
+    export UV_TORCH_BACKEND=cu126
+    warn "Compute capability $GPU_CAP predates Turing — pinning a CUDA 12.6 torch,"
+    warn "since recent wheels carry no kernels for it. Expect SDPA attention and"
+    warn "fp16 rather than bf16. This combination is not well tested; if it"
+    warn "misbehaves, 'python -m vui.doctor' reports what was resolved."
+}
+
 # ---------------------------------------------------------------- ffmpeg libs
 #
 # torchcodec dlopens libtorchcodec_core{4..8}.so — one per ffmpeg major — and
@@ -310,9 +360,21 @@ run_native() {
         command -v uv >/dev/null 2>&1 || die "uv install failed — add ~/.local/bin to PATH and retry."
     fi
 
+    detect_gpu
+    resolve_torch_backend
+
     local extras=()
     [[ "$OS" == "Darwin" && "$ARCH" == "arm64" ]] && extras+=(--extra mlx)
-    log "Syncing Python env (${extras[*]:-base})..."
+    # flash-attn only where its kernels exist (Ampere+). Below that
+    # vui.flash_compat uses SDPA, so installing it would just waste the
+    # download.
+    if cap_at_least 8.0; then
+        extras+=(--extra flash)
+    elif [[ -n "$GPU_CAP" ]]; then
+        log "Skipping flash-attn (needs compute 8.0+, this GPU is $GPU_CAP) — using SDPA."
+    fi
+
+    log "Syncing Python env (${extras[*]:-base})${UV_TORCH_BACKEND:+, torch=$UV_TORCH_BACKEND}..."
     run "uv sync ${extras[*]}"
 
     # After uv sync: the only honest ffmpeg test is importing torchcodec, which
@@ -361,6 +423,7 @@ run_native() {
 
     if [[ "$LAUNCH" -eq 0 || "$DRY_RUN" -eq 1 ]]; then
         log "Setup done."
+        [[ "$DRY_RUN" -eq 0 ]] && uv run python -m vui.doctor || true
         if [[ "$LLM_BACKEND" == "ollama" ]]; then
             log "  Stream: VUI_OLLAMA_MODEL=$MODEL VUI_OLLAMA_URL=$OLLAMA_URL_RESOLVED uv run python -m vui.serving.stream"
         else
@@ -379,6 +442,10 @@ run_native() {
         uv run python -m vui.serving.claude_server >/tmp/vui-claude.log 2>&1 &
         CLAUDE_PID=$!
     fi
+
+    # Surface hardware/ffmpeg/LLM problems here rather than as a stack trace
+    # three minutes into model loading. Non-fatal: the report is advisory.
+    uv run python -m vui.doctor || true
 
     log "Starting Vui streaming server on http://localhost:8080 ..."
     export VUI_LLM_BACKEND="$LLM_BACKEND"

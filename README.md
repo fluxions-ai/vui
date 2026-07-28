@@ -150,6 +150,30 @@ On first run the server auto-creates `qwen3.5-4b-mlx` via `ollama create --exper
 
 > **Help wanted — Apple Silicon.** Vui runs on Mac but the MLX path (TTS worker, MLX-Moonshine ASR, the `qwen3.5-4b-mlx` Ollama variant) hasn't had the same polish as the CUDA path. If you're a Mac user who'd like to help shake out rough edges — kernel perf, streaming stability on M-series, the docker-compose story for Apple Silicon — we'd love contributors. Open an issue or PR on the repo, or get in touch via [fluxions.ai](https://fluxions.ai).
 
+### Hardware support
+
+`uv sync` picks the CUDA build of torch from your driver (`[tool.uv] torch-backend = "auto"`), and the model picks its dtype and attention kernel from the GPU at runtime. In most cases there is nothing to configure.
+
+| Compute capability | Examples | dtype | Attention | Notes |
+|---|---|---|---|---|
+| 9.0 / 10.0 / 12.0 | H100, GH200, B200 | bf16 | FlashAttention-2 | |
+| 8.0–8.9 | A100, A6000, RTX 30xx/40xx, L4 | bf16 | FlashAttention-2 | |
+| 7.5 | T4, RTX 20xx, Quadro RTX | fp16 | PyTorch SDPA | No native bf16 and no FA2 kernels; both are detected and switched automatically. |
+| 7.0 | V100, Titan V | fp16 | PyTorch SDPA | Also needs a CUDA 12 torch — recent wheels carry no `sm_70` kernels. `install.sh` pins `UV_TORCH_BACKEND=cu126`; by hand, set it before `uv sync`. **Lightly tested.** |
+| none | CPU / macOS | fp32 | PyTorch SDPA | The streaming server wants a GPU; standalone CPU inference lives in [`cpu/`](cpu/README.md). |
+
+FlashAttention-2 is an **optional extra**, not a requirement — its wheels are `sm_80+` with no PTX, so below Ampere it can't run at all and `vui.flash_compat` uses a pure-PyTorch SDPA path with the same semantics (correct, slower). `install.sh` adds `--extra flash` only where it will work; by hand it's `uv sync --extra flash`.
+
+**When something looks wrong, start here:**
+
+```sh
+python -m vui.doctor
+```
+
+It reports the GPU and its compute capability, whether the installed torch actually has kernels for it, the resolved dtype, which attention path is active, whether torchcodec can load ffmpeg, and whether the LLM backend is reachable — each with a remedy. Exit code is non-zero only for genuinely blocking problems. `install.sh` runs it for you before starting the server.
+
+Overrides, if the automatic choice is wrong: `VUI_DTYPE=bf16|fp16|fp32` and `VUI_ATTN=torch`.
+
 ### Running without root
 
 `./install.sh --native` needs no sudo and no Docker. Everything lands in `$HOME`: `~/.local/bin` (uv, Claude CLI), `~/.cache/vui/ffmpeg` (ffmpeg shared libs), `~/.cache/huggingface` (weights), `~/.vui` (TLS cert, memories, tasks). Every port is unprivileged (8080/8443/8642), GPU access needs no group membership — the CUDA userspace comes from pip wheels — and audio is WebRTC in the browser, so there's no `/dev/snd` to get access to.
