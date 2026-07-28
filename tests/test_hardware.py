@@ -26,12 +26,19 @@ def _fake_gpu(cap):
     )
 
 
-def _resolve_dtype(cap, env=None):
+def _resolve_dtype(cap, env=None, bf16_ok=None):
+    """bf16_ok defaults to "any CUDA device supports bf16", which is what
+    torch reports on everything from Volta up (emulated below Ampere)."""
+    if bf16_ok is None:
+        bf16_ok = cap is not None
     avail, devcap = _fake_gpu(cap)
-    with avail, devcap, mock.patch.dict("os.environ", env or {}, clear=False):
+    with avail, devcap, mock.patch.object(
+        torch.cuda, "is_bf16_supported", lambda *a, **k: bf16_ok
+    ), mock.patch.dict("os.environ", env or {}, clear=False):
         for fn in (
             hardware.compute_capability,
             hardware.supports_bf16,
+            hardware.bf16_is_native,
             hardware.dtype,
             hardware.gpu_name,
         ):
@@ -57,10 +64,11 @@ def _resolve_dtype(cap, env=None):
         ((9, 0), torch.bfloat16),  # Hopper H100
         ((8, 6), torch.bfloat16),  # RTX 3090
         ((8, 0), torch.bfloat16),  # Ampere A100 — the bf16 floor
-        # Not fp16: this model's activations overflow fp16's range and the
-        # decode dies in scatter_add_. Verified on a 4090 with VUI_DTYPE=fp16.
-        ((7, 5), torch.float32),  # Turing T4
-        ((7, 0), torch.float32),  # Volta V100
+        # Emulated bf16 below Ampere, not fp32: measured ~20% faster than
+        # fp32 on a real T4, at no cost in transcription accuracy. And never
+        # fp16 — its activations overflow and the decode dies in scatter_add_.
+        ((7, 5), torch.bfloat16),  # Turing T4
+        ((7, 0), torch.bfloat16),  # Volta V100
         (None, torch.float32),  # CPU
     ],
 )
@@ -84,15 +92,20 @@ def test_unknown_vui_dtype_is_rejected_loudly():
         _resolve_dtype((8, 0), {"VUI_DTYPE": "float8"})
 
 
+def test_dtype_falls_back_to_fp32_without_any_bf16():
+    """A device torch reports no bf16 for at all gets fp32, never fp16."""
+    assert _resolve_dtype((7, 0), bf16_ok=False) is torch.float32
+
+
 def test_bf16_native_only_from_ampere():
     for cap, want in [((7, 5), False), ((8, 0), True), ((9, 0), True), (None, False)]:
         avail, devcap = _fake_gpu(cap)
         with avail, devcap:
             hardware.compute_capability.cache_clear()
-            hardware.supports_bf16.cache_clear()
-            assert hardware.supports_bf16() is want, cap
+            hardware.bf16_is_native.cache_clear()
+            assert hardware.bf16_is_native() is want, cap
     hardware.compute_capability.cache_clear()
-    hardware.supports_bf16.cache_clear()
+    hardware.bf16_is_native.cache_clear()
 
 
 # --------------------------------------------------------------- attention

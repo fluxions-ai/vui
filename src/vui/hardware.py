@@ -9,13 +9,13 @@ older card gets "no kernel image is available" at the first decode step.
 Compute capability floors that matter here:
 
     >= 8.0  Ampere+   bf16 native, FlashAttention-2 works
-    7.5     Turing    no native bf16 -> fp32; no FA2 -> SDPA fallback
+    7.5     Turing    bf16 emulated (still beats fp32); no FA2 -> SDPA
     7.0     Volta     as Turing, and needs a cu12 torch build (the cu130
                       wheels carry no sm_70 kernels)
     none    CPU/MPS   fp32
 
-fp32 rather than fp16 below Ampere — see `dtype()` for why that isn't the
-obvious choice it looks like.
+Never fp16 — see `dtype()` for why that isn't the obvious choice it looks
+like.
 
 Override with `VUI_DTYPE=bf16|fp16|fp32` when the automatic choice is wrong.
 `python -m vui.doctor` prints everything this module resolves.
@@ -33,6 +33,7 @@ __all__ = [
     "compute_capability",
     "gpu_name",
     "supports_bf16",
+    "bf16_is_native",
     "dtype",
     "autocast",
     "torch_supports_this_gpu",
@@ -72,15 +73,27 @@ def gpu_name() -> str | None:
 
 
 @lru_cache(maxsize=1)
-def supports_bf16() -> bool:
-    """Native bf16 — Ampere (sm_80) and up.
-
-    `torch.cuda.is_bf16_supported()` returns True on some older cards where
-    bf16 is emulated rather than native, which is exactly the slow path we're
-    trying to avoid, so go by compute capability instead.
-    """
+def bf16_is_native() -> bool:
+    """Hardware bf16 — Ampere (sm_80) and up. Below that it's emulated."""
     cap = compute_capability()
     return cap is not None and cap >= (8, 0)
+
+
+@lru_cache(maxsize=1)
+def supports_bf16() -> bool:
+    """Can this device run bf16 at all, natively or emulated?
+
+    Emulated bf16 turns out to be the right choice below Ampere, not a trap:
+    measured on a T4 it is ~20% *faster* than fp32 (half the memory traffic)
+    and no less accurate. So this is the question that decides the dtype;
+    `bf16_is_native()` is only for reporting.
+    """
+    if not torch.cuda.is_available():
+        return False
+    try:
+        return bool(torch.cuda.is_bf16_supported())
+    except Exception:
+        return False
 
 
 def _parse_arch(a: str) -> tuple[int, int] | None:
@@ -131,18 +144,22 @@ def torch_supports_this_gpu() -> bool | None:
 
 @lru_cache(maxsize=1)
 def dtype() -> torch.dtype:
-    """The dtype to run the model in: bf16 where native, else fp32.
+    """The dtype to run the model in: bf16 wherever it runs, else fp32.
 
-    Not fp16 below Ampere, even though that would be the obvious choice. fp16
+    bf16 even below Ampere, where it's emulated rather than accelerated — on a
+    T4 that measured ~20% faster than fp32 (half the memory traffic) at no cost
+    in transcription accuracy, so "no native support" is not a reason to avoid
+    it.
+
+    Never fp16, which looks like the obvious pre-Ampere choice and isn't: it
     keeps bf16's precision but loses most of its exponent range (max 65504),
-    and this model's activations exceed it: a decode in fp16 produces
-    out-of-range sampled tokens and dies in `scatter_add_` with a device-side
-    assert. Measured on a 4090 with `VUI_DTYPE=fp16` forced; the weights
-    themselves fit fine (max |w| ~16), so it's activation overflow.
+    and this model's activations exceed it. A decode in fp16 samples an
+    out-of-range token and dies in `scatter_add_` with a device-side assert
+    (measured on a 4090 with `VUI_DTYPE=fp16` forced; the weights fit fine at
+    max |w| ~16, so it's activations). `VUI_DTYPE=fp16` is still accepted for
+    anyone wanting to fix that.
 
-    fp32 is correct everywhere and about 7x slower than bf16+flash on the same
-    card, which is the price of running at all on pre-Ampere. `VUI_DTYPE=fp16`
-    is still accepted if you want to experiment with fixing it.
+    fp32 is the fallback where bf16 isn't available at all, and off-GPU.
     """
     override = os.environ.get("VUI_DTYPE", "").strip().lower()
     if override:
@@ -153,12 +170,7 @@ def dtype() -> torch.dtype:
             )
         return _DTYPES[override]
 
-    cap = compute_capability()
-    if cap is None:
-        return torch.float32
-    if cap >= (8, 0):
-        return torch.bfloat16
-    return torch.float32
+    return torch.bfloat16 if supports_bf16() else torch.float32
 
 
 def autocast(enabled: bool = True):
@@ -188,5 +200,6 @@ def summary() -> dict:
         "torch_supports_gpu": torch_supports_this_gpu(),
         "dtype": str(dtype()).replace("torch.", ""),
         "dtype_forced": bool(os.environ.get("VUI_DTYPE", "").strip()),
-        "bf16_native": supports_bf16(),
+        "bf16_usable": supports_bf16(),
+        "bf16_native": bf16_is_native(),
     }

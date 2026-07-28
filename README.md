@@ -152,28 +152,28 @@ On first run the server auto-creates `qwen3.5-4b-mlx` via `ollama create --exper
 
 ### Hardware support
 
-`uv sync` picks the CUDA build of torch from your driver (`[tool.uv] torch-backend = "auto"`), and the model picks its dtype and attention kernel from the GPU at runtime. In most cases there is nothing to configure.
+The model picks its dtype and attention kernel from the GPU at runtime, and `install.sh` picks the CUDA build of torch to match. In most cases there is nothing to configure.
 
 | Compute capability | Examples | dtype | Attention | Notes |
 |---|---|---|---|---|
 | 9.0 / 10.0 / 12.0 | H100, GH200, B200 | bf16 | FlashAttention-2 | |
 | 8.0–8.9 | A100, A6000, RTX 30xx/40xx, L4 | bf16 | FlashAttention-2 | |
-| 7.5 | T4, RTX 20xx, Quadro RTX | fp32 | PyTorch SDPA | No native bf16 and no FA2 kernels; both switched automatically. fp32 costs speed and memory — see below. |
-| 7.0 | V100, Titan V | fp32 | PyTorch SDPA | Also needs a CUDA 12 torch — recent wheels carry no `sm_70` kernels. `install.sh` pins `UV_TORCH_BACKEND=cu126`. **Untested.** |
+| 7.5 | T4, RTX 20xx, Quadro RTX | bf16 (emulated) | PyTorch SDPA | No hardware bf16 and no FA2 kernels; both handled automatically. Verified on a real T4. |
+| 7.0 | V100, Titan V | bf16 (emulated) | PyTorch SDPA | Also needs a CUDA 12 torch — recent wheels carry no `sm_70` kernels. `install.sh` pins `UV_TORCH_BACKEND=cu126`. **Untested.** |
 | none | CPU / macOS | fp32 | PyTorch SDPA | The streaming server wants a GPU; standalone CPU inference lives in [`cpu/`](cpu/README.md). |
 
-**Below Ampere it's fp32, not fp16.** fp16 would be the obvious choice — same precision as bf16, half the memory of fp32 — but it loses most of bf16's exponent range, and this model's activations overflow it: the decode produces out-of-range tokens and dies in `scatter_add_` with a device-side assert. `VUI_DTYPE=fp16` is still accepted if you want to try fixing that.
+**Never fp16.** It looks like the obvious pre-Ampere choice — bf16's precision, half fp32's memory — but it loses most of bf16's exponent range, and this model's activations overflow it: the decode samples an out-of-range token and dies in `scatter_add_` with a device-side assert. Below Ampere bf16 is used instead, emulated rather than accelerated; on a T4 that measured ~20% faster than fp32 at no cost in accuracy. `VUI_DTYPE=fp16` is still accepted if you want to try fixing it.
 
 Measured on one RTX 4090, rendering the same line (WER via Moonshine against the input text):
 
-| Config | WER | RTF |
+| Config | RTX 4090 (8.9) | Tesla T4 (7.5) |
 |---|---|---|
-| bf16 + FlashAttention-2 | 0.000 | 8.6× |
-| bf16 + SDPA | 0.042 | 3.2× |
-| fp32 + SDPA | 0.000 | 1.3× |
-| fp16 | — | crashes |
+| bf16 + FlashAttention-2 | WER 0.000 · RTF 8.6× | n/a (no FA2 kernels) |
+| bf16 + SDPA | WER 0.042 · RTF 3.2× | WER 0.000 · RTF 1.25× |
+| fp32 + SDPA | WER 0.000 · RTF 1.3× | WER 0.125 · RTF 1.02× |
+| fp16 | crashes | crashes |
 
-So the SDPA fallback is sound, and fp32 is correct but ~7× slower than the fast path — still above realtime on a 4090, which sets expectations for what a T4 will manage. `tests/hardware_matrix.py` reproduces this on any CUDA box.
+So the SDPA fallback is sound, and a T4 runs just above realtime. `tests/hardware_matrix.py` reproduces this on any CUDA box; `tests/modal_t4.py` runs the whole thing on a rented T4 via Modal.
 
 (The script also reports waveform correlation against the baseline. Expect it to be low: sampling is stochastic and any numerical difference changes which token is drawn, after which the waveforms diverge entirely. WER is the metric that means something here.)
 

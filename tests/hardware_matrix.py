@@ -35,6 +35,11 @@ import sys
 import time
 from pathlib import Path
 
+# Must precede any torchcodec import in this process: vui/__init__ preloads the
+# ffmpeg libs torchcodec links against. The child renders import it themselves;
+# the parent needs it too, for transcription and waveform correlation.
+import vui  # noqa: F401,E402
+
 TEXT = (
     "So the thing about this is, it's not really what you'd expect at first. "
     "Give it a moment and it starts to make sense."
@@ -56,7 +61,6 @@ COMBINATIONS = [
 def _render_one(dtype: str, attn: str, prompt: str, out_wav: str) -> dict:
     """Runs in the subprocess: render TEXT once and report metrics."""
     import torch
-    import vui  # noqa: F401  — preloads ffmpeg before torchcodec
     from julius.resample import resample_frac
     from torchcodec.decoders import AudioDecoder
     from torchcodec.encoders import AudioEncoder

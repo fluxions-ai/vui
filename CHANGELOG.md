@@ -13,15 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   install hardcoded FlashAttention-2, so anything below compute capability 8.0
   failed — bf16 with no native support, and a flash-attn wheel whose cubins are
   `sm_80/90/100/120` with no PTX, which dies at the first decode step. Now:
-  - New `vui.hardware` resolves dtype from the device: bf16 at 8.0+, fp32
-    below that and off-GPU. Override with `VUI_DTYPE`. The 13 hardcoded
-    `torch.bfloat16` sites now go through it. **Not fp16** below Ampere,
-    despite it being the obvious choice — it keeps bf16's precision but loses
-    most of its exponent range, and this model's activations overflow it: the
-    decode samples out-of-range tokens and dies in `scatter_add_` with a
-    device-side assert. Measured by forcing `VUI_DTYPE=fp16` on a 4090; the
-    weights themselves fit fine (max |w| ~16), so it's activation overflow.
-    fp32 is correct everywhere at roughly 7x the cost of bf16+flash.
+  - New `vui.hardware` resolves dtype from the device: bf16 wherever torch can
+    run it — including emulated below Ampere — and fp32 otherwise. Override
+    with `VUI_DTYPE`. The 13 hardcoded `torch.bfloat16` sites go through it.
+    **Never fp16**, despite it being the obvious pre-Ampere choice: it keeps
+    bf16's precision but loses most of its exponent range, and this model's
+    activations overflow it — the decode samples an out-of-range token and
+    dies in `scatter_add_` with a device-side assert. Measured by forcing
+    `VUI_DTYPE=fp16` on a 4090; the weights fit fine (max |w| ~16), so it's
+    activations. Emulated bf16 was initially replaced with fp32 on the
+    assumption that "no hardware support" meant "slow path", but a real T4
+    measured it ~20% *faster* than fp32 at no cost in accuracy, so bf16 it is.
   - `vui.flash_compat` checks compute capability on the first call and goes
     straight to SDPA below 8.0, instead of letting a kernel launch fail and
     catching the error. The launch-error catch stays as a backstop for Jetson,
@@ -29,10 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **flash-attn is now an optional extra** (`uv sync --extra flash`) rather
     than a hard dependency, since the SDPA path is a correct substitute.
     `install.sh` adds it only at 8.0+.
-  - `pyproject.toml` sets `[tool.uv] torch-backend = "auto"`, so `uv sync`
-    picks the CUDA build from the driver. That resolves from the driver
-    version, not the compute capability, so `install.sh` still pins `cu126` for
-    pre-Turing cards, whose kernels recent wheels omit entirely.
+  - `install.sh` exports `UV_TORCH_BACKEND` from the detected GPU, so the
+    right CUDA build of torch gets installed. Deliberately *not* set in
+    `pyproject.toml`: `[tool.uv] torch-backend` only exists in recent uv, and
+    uv errors on unknown fields there rather than ignoring them, so pinning it
+    in the project makes it unsyncable on an older uv (found when a Modal
+    image with an older uv refused to build). The env var is ignored by
+    versions that don't know it. The default build covers sm_75+; `auto`
+    resolves from driver version rather than compute capability, so pre-Turing
+    still needs an explicit `cu126`.
 - **`python -m vui.doctor`** — preflight report: GPU and compute capability,
   whether the installed torch has kernels for it, resolved dtype, active
   attention path, whether torchcodec can load ffmpeg, LLM reachability, and
@@ -46,9 +53,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tests/hardware_matrix.py` — renders the same line under each dtype and
   attention combination on a real GPU, then transcribes each with Moonshine and
   scores WER against the input. Statistics alone don't catch garbage audio.
-  On one RTX 4090: bf16+flash WER 0.000 at 8.6x realtime, bf16+SDPA 0.042 at
-  3.2x, fp32+SDPA 0.000 at 1.3x. So the SDPA fallback is sound and fp32 is
-  correct, at roughly 7x the cost of the fast path.
+  On an RTX 4090: bf16+flash WER 0.000 at 8.6x realtime, bf16+SDPA 0.042 at
+  3.2x, fp32+SDPA 0.000 at 1.3x. On a Tesla T4 (via `tests/modal_t4.py`):
+  bf16+SDPA WER 0.000 at 1.25x, fp32+SDPA 0.125 at 1.02x. So the SDPA fallback
+  is sound and a T4 runs just above realtime.
+- `tests/modal_t4.py` — runs the doctor, the unit tests and the render matrix
+  on a rented Turing T4 via Modal, from an image with no ffmpeg, so the
+  pre-Ampere paths and the rootless ffmpeg fetch are exercised on hardware
+  rather than simulated.
+- `[dependency-groups] dev` with pytest and pytest-asyncio, plus
+  `asyncio_mode = "auto"`. The async backend tests previously needed a plugin
+  nothing declared, so a fresh checkout collected 11 errors.
 
 - **Rootless install — `./install.sh --native` now needs no sudo and no Docker.**
   See [`docs/rootless-install.md`](docs/rootless-install.md). Two things used to

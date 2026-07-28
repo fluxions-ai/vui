@@ -45,6 +45,13 @@ dependencies = [
     "nvidia-cublas-cu12 ; sys_platform == 'linux'",
 ]
 
+[dependency-groups]
+# `uv sync` installs these by default; `--no-dev` skips them.
+dev = [
+    "pytest",
+    "pytest-asyncio",   # the backend/route tests are async
+]
+
 [project.optional-dependencies]
 # FlashAttention-2. Optional because the pinned wheels carry cubins for
 # sm_80/90/100/120 and no PTX, so on anything older (Turing sm_75, Volta
@@ -67,17 +74,15 @@ moonshine = [
     "moonshine-voice",
 ]
 
-[tool.uv]
-# Pick the CUDA build of torch from the installed driver, rather than always
-# taking the newest one. This is what lets `uv sync` work on a range of cards
-# without anyone passing flags.
+# NOTE: no `[tool.uv] torch-backend` here on purpose. It only exists in recent
+# uv, and uv *errors* on unknown [tool.uv] fields rather than ignoring them — so
+# pinning it would make this project unsyncable on an older uv. `install.sh`
+# exports UV_TORCH_BACKEND instead, which older uv simply ignores.
 #
-# It resolves from the *driver version*, though — not the compute capability —
-# so it can still choose a build with no kernels for a very old card. Pre-Turing
-# (Volta sm_70, Pascal) needs `UV_TORCH_BACKEND=cu126` explicitly; install.sh
-# detects that case and sets it, and `python -m vui.doctor` reports it if the
-# torch you ended up with has no kernels for your GPU.
-torch-backend = "auto"
+# The default build (cu130) already covers sm_75 and up. Auto-selection only
+# matters below Turing, where recent wheels carry no kernels at all:
+#     UV_TORCH_BACKEND=cu126 uv sync     # Volta / Pascal
+# `python -m vui.doctor` tells you if the torch you have can't run your GPU.
 
 [tool.uv.sources]
 # Pre-built wheels from a community mirror — avoids the (slow + fragile) source
@@ -98,3 +103,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "vui.serving.stream" = ["index.html", "silero_vad.onnx"]
+
+[tool.pytest.ini_options]
+# The backend and route tests are `async def` with no explicit marker.
+asyncio_mode = "auto"

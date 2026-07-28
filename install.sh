@@ -206,22 +206,28 @@ cap_at_least() {
     (( hw_minor >= wt_minor ))
 }
 
-# pyproject.toml sets `[tool.uv] torch-backend = "auto"`, so uv already picks a
-# CUDA build per the installed driver — nothing to do in the common case.
+# Which CUDA build of torch to install. Set here rather than in pyproject.toml:
+# `[tool.uv] torch-backend` only exists in recent uv, and uv errors on unknown
+# fields there, so pinning it in the project would break older uv outright. The
+# env var is ignored by versions that don't know it.
 #
-# What `auto` can't see is the compute capability: a Volta box with a current
-# driver resolves to a recent build that has no sm_70 kernels. That's the one
-# case worth overriding here.
+# `auto` resolves from the *driver version*, which is right almost always — but
+# it can't see the compute capability, so a Volta box with a current driver
+# still lands on a build with no sm_70 kernels. Hence the explicit pin below.
 resolve_torch_backend() {
     [[ -n "${UV_TORCH_BACKEND:-}" ]] && return 0   # respect an explicit choice
     [[ -z "$GPU_CAP" ]] && return 0
-    cap_at_least 7.5 && return 0
+
+    if cap_at_least 7.5; then
+        export UV_TORCH_BACKEND=auto
+        return 0
+    fi
 
     export UV_TORCH_BACKEND=cu126
     warn "Compute capability $GPU_CAP predates Turing — pinning a CUDA 12.6 torch,"
     warn "since recent wheels carry no kernels for it. Expect SDPA attention and"
-    warn "fp16 rather than bf16. This combination is not well tested; if it"
-    warn "misbehaves, 'python -m vui.doctor' reports what was resolved."
+    warn "fp32 rather than bf16. This combination is untested; if it misbehaves,"
+    warn "'python -m vui.doctor' reports what was actually resolved."
 }
 
 # ---------------------------------------------------------------- ffmpeg libs
