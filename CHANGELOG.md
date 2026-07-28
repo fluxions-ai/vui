@@ -7,7 +7,129 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Runs on more than Ampere-and-newer.** The model hardcoded bf16 and the
+  install hardcoded FlashAttention-2, so anything below compute capability 8.0
+  failed — bf16 with no native support, and a flash-attn wheel whose cubins are
+  `sm_80/90/100/120` with no PTX, which dies at the first decode step. Now:
+  - New `vui.hardware` resolves dtype from the device: bf16 wherever torch can
+    run it — including emulated below Ampere — and fp32 otherwise. Override
+    with `VUI_DTYPE`. The 13 hardcoded `torch.bfloat16` sites go through it.
+    **Never fp16**, despite it being the obvious pre-Ampere choice: it keeps
+    bf16's precision but loses most of its exponent range, and this model's
+    activations overflow it — the decode samples an out-of-range token and
+    dies in `scatter_add_` with a device-side assert. Measured by forcing
+    `VUI_DTYPE=fp16` on a 4090; the weights fit fine (max |w| ~16), so it's
+    activations. Emulated bf16 was initially replaced with fp32 on the
+    assumption that "no hardware support" meant "slow path", but measured on a
+    real T4 it is ~20% *faster* than fp32 at no cost in accuracy, so bf16 it
+    is. Measured across an RTX 4090 and a Tesla T4, rendering a fixed line and
+    scoring WER with Moonshine: bf16+flash 0.000 at 8.6x realtime and
+    bf16+SDPA 0.042 at 3.2x on the 4090; bf16+SDPA 0.000 at 1.25x and
+    fp32+SDPA 0.125 at 1.02x on the T4.
+  - `vui.flash_compat` checks compute capability on the first call and goes
+    straight to SDPA below 8.0, instead of letting a kernel launch fail and
+    catching the error. The launch-error catch stays as a backstop for Jetson,
+    where the capability looks fine but the wheel has no matching cubin.
+  - **flash-attn is now an optional extra** (`uv sync --extra flash`) rather
+    than a hard dependency, since the SDPA path is a correct substitute.
+    `install.sh` adds it only at 8.0+.
+  - `install.sh` exports `UV_TORCH_BACKEND` from the detected GPU, so the
+    right CUDA build of torch gets installed. Deliberately *not* set in
+    `pyproject.toml`: `[tool.uv] torch-backend` only exists in recent uv, and
+    uv errors on unknown fields there rather than ignoring them, so pinning it
+    in the project makes it unsyncable on an older uv (found when a Modal
+    image with an older uv refused to build). The env var is ignored by
+    versions that don't know it. The default build covers sm_75+; `auto`
+    resolves from driver version rather than compute capability, so pre-Turing
+    still needs an explicit `cu126`.
+- **`python -m vui.doctor`** — preflight report: GPU and compute capability,
+  whether the installed torch has kernels for it, resolved dtype, active
+  attention path, whether torchcodec can load ffmpeg, LLM reachability, and
+  free disk — each with a remedy. Non-zero exit only for blocking problems.
+  `install.sh` runs it before starting the server, so hardware mismatches
+  surface immediately rather than minutes into model loading.
+- `tests/test_hardware.py` — dtype selection, attention dispatch, and
+  torch/GPU kernel compatibility across faked compute capabilities (Volta
+  through Blackwell), so decisions that would otherwise need a shelf of old
+  GPUs are covered on any box.
+- `[dependency-groups] dev` with pytest and pytest-asyncio, plus
+  `asyncio_mode = "auto"`. The async backend tests previously needed a plugin
+  nothing declared, so a fresh checkout collected 11 errors.
+
+- **Rootless install — `./install.sh --native` now needs no sudo and no Docker.**
+  See [`docs/rootless-install.md`](docs/rootless-install.md). Two things used to
+  require root, and one of them was a mistake:
+  - The ffmpeg gate tested `command -v ffmpeg`, but Vui never runs the ffmpeg
+    *binary* — `torchcodec` needs the shared libraries, which it reaches via
+    `NEEDED` entries on `libtorchcodec_core{4..8}.so` (one per ffmpeg major).
+    The old check therefore passed on hosts with a static ffmpeg while
+    torchcodec was still broken, and failed on hosts that were fine. It now
+    tests by importing torchcodec, and on Linux fetches an LGPL shared build
+    into `~/.cache/vui/ffmpeg` when there's nothing usable. New
+    `vui.ffmpeg_libs` preloads it with `ctypes.CDLL(RTLD_GLOBAL)` — the same
+    trick `vui._preload_nvidia_npp` already used — so no `LD_LIBRARY_PATH` is
+    needed for processes you start by hand later. Inert when the system
+    supplies ffmpeg. Knobs: `VUI_FFMPEG_DIR`, `VUI_FFMPEG_VERSION`.
+  - The installer no longer installs Ollama at all (its installer requires
+    root, writes `/usr/local`, adds a system user and a systemd unit — while
+    `install.sh` went on to background `ollama serve` itself anyway). It now
+    uses an Ollama you already run, or defaults to vLLM, which is pip
+    installable. New `--llm vllm|ollama`; `VUI_MODE` env alias for the
+    docker/native choice.
+- `tests/test_llm_backend.py` and `tests/test_model_routes.py` — backend and
+  route coverage against mocked HTTP, so they run without a GPU or a live LLM.
+
+### Changed
+
+- **vLLM is now a first-class backend, not just a supported one.** Its hot path
+  was already at parity; the management surface was hardcoded to Ollama:
+  - `LLMBackend` gained `health()`, `loaded_models()`, `pull()`, and
+    `supports_model_switch` / `supports_pull` capability flags.
+  - The model routes moved to `/llm/*` (old `/ollama/*` paths still work) and
+    now go through the backend. The UI hides **Pull** and disables the selector
+    according to the backend's capabilities, and shows which backend is active.
+  - `srv.ollama_model` → `srv.llm_model`, derived from `backend.model` rather
+    than stored alongside it. The vestigial `model=` parameter is gone from the
+    `llm_*` helpers, which had been `del`-ing it for some time.
+  - `VUI_LLM_BACKEND` is validated eagerly at startup with a backend banner,
+    instead of raising inside a spawned warmup task where it was swallowed.
+  - `VUI_OLLAMA_URL` and `OLLAMA_URL` no longer address separate code paths;
+    either alone is now sufficient.
+  - Default vLLM model is `google/gemma-4-E4B-it`.
+
 ### Fixed
+
+- **The UI's LLM model dropdown only ever changed a label.**
+  `handle_ollama_set_model` never called into the backend, and the re-prefill
+  that followed warmed the *old* model — so the switch appeared to succeed
+  while the previous model kept answering. Affected Ollama too, not just vLLM.
+- **The `llm` status pill was permanently red under vLLM.** `probe_llm()` asked
+  the backend for its base URL and then hit `/api/version`, which only Ollama
+  serves. It's backend-dispatched now.
+- Under vLLM the model dropdown rendered empty and **Pull** returned HTTP 500;
+  the latter is now a 409, since having no model registry is a capability gap
+  rather than a server fault. A non-2xx model list falls back to the current
+  model instead of an empty dropdown.
+- On Apple Silicon, `ensure_mlx_model()` ran regardless of backend — a
+  multi-GB download plus an int4 quantize, blocking warmup, for a model the
+  vLLM path would never reference. Now gated on the Ollama backend.
+- The `OLLAMA_NUM_PARALLEL` warning (which shells out to
+  `systemctl`/`pgrep`/`launchctl`) is likewise gated on Ollama.
+- **`vui.doctor` reported "no kernels for this GPU" on cards that work.** It
+  exact-matched the device against `torch.cuda.get_arch_list()`, but cubins are
+  forward-compatible within a major generation — an `sm_86` kernel runs on an
+  `sm_89` device. Every RTX 4090 and Jetson Orin would have been told its torch
+  was broken. Found by running the check on a 4090.
+- **fp32 + flash-attn crashed** with "FlashAttention only support fp16 and bf16
+  data type", reachable whenever the model runs in fp32 on a card that would
+  otherwise use the kernel. `flash_compat` now checks the input dtype alongside
+  the compute capability and falls back to SDPA.
+- `install.sh --dry-run` could `die` on a host without ffmpeg, so it wasn't
+  side-effect-free. `~/.local/bin` is now added to `PATH` unconditionally in
+  the native path, rather than only inside the "uv wasn't found" branch — a
+  second run couldn't otherwise see what the first had installed.
 
 - **ARM64 Linux: `ModuleNotFoundError: No module named 'flash_attn'`.** Only an
   x86_64 wheel was pinned, so the TTS worker crashed on the first decode step on

@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from vui import hardware
 from vui.model import Vui
 from vui.qwen_codec import DOWNSAMPLE_RATE, FRAME_RATE, QwenCodecDecoder
 from vui.sampling import multinomial, sample_top_k, sample_top_p, sample_top_p_top_k
@@ -199,7 +200,7 @@ class InferenceState:
         self._codec_graph_first = None
         self._codec_graph_ctx = None
         if self._codec_graphs:
-            with torch.autocast("cuda", torch.bfloat16):
+            with hardware.autocast():
                 self.codec.setup_decode_graph(
                     self.chunk_frames, device, dtype, pool=self._graph_pool
                 )
@@ -296,7 +297,7 @@ class InferenceState:
         self._ckpt_spk_token = spk_token
         self._ckpt_spk_token_2 = spk_token_2
         with (
-            torch.autocast("cuda", torch.bfloat16, True),
+            hardware.autocast(),
             sdpa_kernel([SDPBackend.MATH]),
         ):
             for segs, seg_spk in (
@@ -617,7 +618,7 @@ def stream_frames(
     total_frames = 0
 
     with (
-        torch.autocast("cuda", torch.bfloat16, True),
+        hardware.autocast(),
         sdpa_kernel([SDPBackend.MATH]),
     ):
         # --- Prompt prefill (interleaved text/audio segments) ---

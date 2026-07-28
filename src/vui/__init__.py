@@ -32,3 +32,22 @@ def _preload_nvidia_npp() -> None:
 
 _preload_nvidia_npp()
 del _preload_nvidia_npp
+
+
+def _preload_ffmpeg() -> None:
+    """Preload a user-local ffmpeg so torchcodec's runtime dlopen resolves.
+
+    Rootless installs have no system ffmpeg to find; install.sh caches an LGPL
+    shared build under ~/.cache/vui/ffmpeg. See vui.ffmpeg_libs. No-op when the
+    system supplies ffmpeg (nothing cached) or on macOS.
+    """
+    try:
+        from vui.ffmpeg_libs import preload
+    except Exception:
+        # A preload helper must never break `import vui`.
+        return
+    preload()
+
+
+_preload_ffmpeg()
+del _preload_ffmpeg

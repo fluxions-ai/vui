@@ -4,10 +4,14 @@ The model needs exactly one entry point from `flash_attn` —
 `flash_attn_with_kvcache` — and there are hosts where it isn't usable:
 
 * CPU / macOS installs, where the package isn't installed at all;
-* Jetson-class ARM64 (Orin sm_87, Thor sm_110), where the published aarch64
-  wheel imports fine but has no kernels for the device (it is built for
-  sm_80/90/100/120 with no PTX fallback) — that surfaces as a launch-time
-  "no kernel image is available for execution on the device".
+* pre-Ampere CUDA cards (Turing sm_75, Volta sm_70), which FlashAttention-2 has
+  no kernels for at all — caught up front from the compute capability, so no
+  launch has to fail first;
+* Jetson-class ARM64 (Orin sm_87, Thor sm_110), where the capability looks new
+  enough but the published aarch64 wheel still carries no cubin for the device
+  (it is built for sm_80/90/100/120 with no PTX fallback) — that one can only
+  surface as a launch-time "no kernel image is available for execution on the
+  device".
 
 Server ARM64 (Grace-Hopper sm_90, Grace-Blackwell sm_100) *is* covered by the
 aarch64 wheel pinned in pyproject.toml, and uses the real kernel.
@@ -157,20 +161,75 @@ def _fallback_notice(reason: str) -> None:
     )
 
 
+# FlashAttention-2 needs Ampere or newer. Below that the kernel cannot run at
+# all, so there's no point letting a launch fail to find out.
+_FLASH_MIN_CAPABILITY = (8, 0)
+
 _impl = _flash_fn or _sdpa_attn_with_kvcache
+_checked_capability = False
 
 if not HAS_FLASH_ATTN:
     _fallback_notice("flash_attn unavailable on this platform")
 
 
-def flash_attn_with_kvcache(*args, **kwargs):
-    """flash-attn's kernel, degrading to SDPA if this GPU has no kernels for it.
+def _capability_permits_flash() -> bool:
+    """Is this device new enough for FlashAttention-2?
 
-    The switch is one-way and happens on the first failing call — in practice
-    during engine warm-up, before any CUDA graph capture, so the captured
-    graphs stay consistent.
+    Deliberately evaluated on the first call rather than at import: querying
+    the capability initialises a CUDA context, and this module is imported at
+    model-import time, potentially before workers are spawned.
     """
-    global _impl
+    try:
+        if not torch.cuda.is_available():
+            return False
+        return torch.cuda.get_device_capability() >= _FLASH_MIN_CAPABILITY
+    except Exception:
+        # Can't tell — let the call proceed and rely on the launch-error catch.
+        return True
+
+
+def _dtype_permits_flash(q) -> bool:
+    """flash-attn takes fp16 and bf16 only.
+
+    It raises "FlashAttention only support fp16 and bf16 data type" on fp32,
+    which is reachable whenever the model runs in fp32 — pre-Ampere, or anyone
+    passing VUI_DTYPE=fp32 on a card that would otherwise use the kernel.
+    """
+    return q.dtype in (torch.float16, torch.bfloat16)
+
+
+def flash_attn_with_kvcache(*args, **kwargs):
+    """flash-attn's kernel, degrading to SDPA where it can't run.
+
+    Two ways we end up on SDPA, in order of preference:
+
+    1. The device's compute capability is below Ampere, checked once on the
+       first call. FlashAttention-2 has no kernels for those cards, so we skip
+       it rather than provoke a failed launch.
+    2. The launch fails anyway with an arch error — the Jetson case, where the
+       capability looks new enough (Orin sm_87, Thor sm_110) but the published
+       wheel happens to carry no cubin for it.
+
+    Either switch is one-way and happens before CUDA graph capture during
+    engine warm-up, so captured graphs stay consistent.
+    """
+    global _impl, _checked_capability
+
+    if not _checked_capability:
+        _checked_capability = True
+        if _impl is not _sdpa_attn_with_kvcache:
+            if not _capability_permits_flash():
+                _impl = _sdpa_attn_with_kvcache
+                cap = torch.cuda.get_device_capability()
+                _fallback_notice(
+                    f"flash_attn needs compute capability "
+                    f">= {_FLASH_MIN_CAPABILITY[0]}.{_FLASH_MIN_CAPABILITY[1]}, "
+                    f"this GPU is {cap[0]}.{cap[1]}"
+                )
+            elif args and hasattr(args[0], "dtype") and not _dtype_permits_flash(args[0]):
+                _impl = _sdpa_attn_with_kvcache
+                _fallback_notice(f"flash_attn does not support {args[0].dtype}")
+
     if _impl is _sdpa_attn_with_kvcache:
         return _sdpa_attn_with_kvcache(*args, **kwargs)
     try:

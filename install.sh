@@ -11,18 +11,28 @@
 #   ./install.sh --upgrade        # git pull, re-sync, then launch
 #   ./install.sh --no-claude      # skip the Claude task server
 #   ./install.sh --no-launch      # set up only, don't start anything
-#   ./install.sh --model qwen3:8b # alternate Ollama model
+#   ./install.sh --llm vllm       # force the LLM backend (vllm | ollama)
+#   ./install.sh --model qwen3:8b # alternate model (backend-specific id)
 #   ./install.sh --dry-run        # print the plan, change nothing
 #   ./install.sh --help
 #
 # Env knobs:
 #   VUI_REF         git ref for --upgrade (default: main; pin a tag for stability)
 #   OLLAMA_HOST     remote Ollama endpoint (e.g. gpu-box.lan:11434)
+#   VUI_VLLM_URL    vLLM endpoint (default: http://localhost:8000)
 #   VUI_TASK_PORT   port for the Claude task server (default: 8642)
+#   VUI_MODE        "native" or "docker" — same as the flags, for curl | bash
+#   VUI_FFMPEG_DIR  where to cache ffmpeg shared libs (default: ~/.cache/vui/ffmpeg)
+#   VUI_FFMPEG_VERSION  ffmpeg major line to fetch (default: 7.1)
+#
+# This script never uses sudo. On Linux it needs no root: ffmpeg shared libs are
+# cached under $HOME, and the LLM is either one you already run or a pip-installed
+# vLLM. See docs/rootless-install.md.
 
 set -euo pipefail
 
-MODEL="qwen3.5:4b"
+MODEL=""            # resolved per-backend once LLM_BACKEND is known
+LLM_BACKEND=""      # "", "ollama", "vllm"
 LAUNCH=1
 WITH_CLAUDE=1
 UPGRADE=0
@@ -41,14 +51,22 @@ Modes (auto-detect; flags override):
   ./install.sh --upgrade        git pull, re-sync, then launch
   ./install.sh --no-claude      skip the Claude task server
   ./install.sh --no-launch      set up only, don't start anything
-  ./install.sh --model qwen3:8b alternate Ollama model
+  ./install.sh --llm vllm       force the LLM backend (vllm | ollama)
+  ./install.sh --model qwen3:8b alternate model (backend-specific id)
   ./install.sh --dry-run        print the plan, change nothing
   ./install.sh --help
 
 Env knobs:
   VUI_REF         git ref for --upgrade (default: main; pin a tag for stability)
   OLLAMA_HOST     remote Ollama endpoint (e.g. gpu-box.lan:11434)
+  VUI_VLLM_URL    vLLM endpoint (default: http://localhost:8000)
   VUI_TASK_PORT   port for the Claude task server (default: 8642)
+  VUI_MODE        "native" or "docker" — same as the flags, for curl | bash
+  VUI_FFMPEG_DIR  where to cache ffmpeg shared libs (default: ~/.cache/vui/ffmpeg)
+  VUI_FFMPEG_VERSION  ffmpeg major line to fetch (default: 7.1)
+
+This script never uses sudo. The native path needs no root — see
+docs/rootless-install.md.
 EOF
 }
 
@@ -59,6 +77,7 @@ while [[ $# -gt 0 ]]; do
         --no-claude) WITH_CLAUDE=0; shift ;;
         --docker) MODE="docker"; shift ;;
         --native) MODE="native"; shift ;;
+        --llm) LLM_BACKEND="$2"; shift 2 ;;
         --upgrade) UPGRADE=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help) show_help; exit 0 ;;
@@ -106,6 +125,28 @@ REMOTE_OLLAMA=0
 
 ollama_up() { curl -fsS "$OLLAMA_URL_RESOLVED/api/version" >/dev/null 2>&1; }
 
+VLLM_URL_RESOLVED="${VUI_VLLM_URL:-http://localhost:8000}"
+vllm_up() { curl -fsS "$VLLM_URL_RESOLVED/v1/models" >/dev/null 2>&1; }
+
+# Pick the LLM backend. We never *install* Ollama (its installer requires root);
+# we use one that's already running, else vLLM, which is pip-installable and so
+# works without root. Neither being up is fine — the server serves TTS/ASR
+# regardless and the UI's llm pill goes green on its own once a backend appears.
+resolve_llm_backend() {
+    [[ -n "$LLM_BACKEND" ]] && return 0
+    if [[ -n "${VUI_LLM_BACKEND:-}" ]]; then
+        LLM_BACKEND="$VUI_LLM_BACKEND"
+    elif ollama_up; then
+        LLM_BACKEND="ollama"
+    elif vllm_up; then
+        LLM_BACKEND="vllm"
+    elif [[ "$REMOTE_OLLAMA" -eq 1 ]]; then
+        die "OLLAMA_HOST=$RAW_HOST set but unreachable at $OLLAMA_URL_RESOLVED."
+    else
+        LLM_BACKEND="vllm"
+    fi
+}
+
 docker_usable() {
     command -v docker >/dev/null 2>&1 || return 1
     docker compose version >/dev/null 2>&1 || return 1
@@ -113,7 +154,9 @@ docker_usable() {
     return 0
 }
 
-# Decide docker vs native if not forced.
+# Decide docker vs native if not forced. VUI_MODE lets `curl … | bash` force one
+# without the `-s --` incantation.
+MODE="${MODE:-${VUI_MODE:-}}"
 if [[ -z "$MODE" ]]; then
     if docker_usable; then
         if [[ -t 0 ]]; then
@@ -130,6 +173,127 @@ if [[ -z "$MODE" ]]; then
         MODE="native"
     fi
 fi
+
+# -------------------------------------------------------------------- GPU
+#
+# Two things depend on the card's compute capability:
+#
+#   * which CUDA build of torch to install — the cu130 wheels carry no sm_70
+#     kernels, so Volta needs a cu12 build;
+#   * whether to install flash-attn at all — its wheels are sm_80+ with no PTX,
+#     and vui.flash_compat falls back to SDPA below that anyway.
+#
+# `nvidia-smi --query-gpu=compute_cap` needs no root and no CUDA toolkit.
+
+GPU_CAP=""      # e.g. "8.6"; empty when there's no NVIDIA GPU
+
+detect_gpu() {
+    command -v nvidia-smi >/dev/null 2>&1 || return 0
+    GPU_CAP="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+               | head -1 | tr -d '[:space:]')"
+    [[ -n "$GPU_CAP" ]] && log "GPU compute capability: $GPU_CAP"
+    return 0
+}
+
+# Numeric compare on "major.minor" without bc.
+cap_at_least() {
+    local want="$1" have="${GPU_CAP:-0.0}"
+    [[ -z "$GPU_CAP" ]] && return 1
+    local hw_major="${have%%.*}" hw_minor="${have##*.}"
+    local wt_major="${want%%.*}" wt_minor="${want##*.}"
+    (( hw_major > wt_major )) && return 0
+    (( hw_major < wt_major )) && return 1
+    (( hw_minor >= wt_minor ))
+}
+
+# Which CUDA build of torch to install. Set here rather than in pyproject.toml:
+# `[tool.uv] torch-backend` only exists in recent uv, and uv errors on unknown
+# fields there, so pinning it in the project would break older uv outright. The
+# env var is ignored by versions that don't know it.
+#
+# `auto` resolves from the *driver version*, which is right almost always — but
+# it can't see the compute capability, so a Volta box with a current driver
+# still lands on a build with no sm_70 kernels. Hence the explicit pin below.
+resolve_torch_backend() {
+    [[ -n "${UV_TORCH_BACKEND:-}" ]] && return 0   # respect an explicit choice
+    [[ -z "$GPU_CAP" ]] && return 0
+
+    if cap_at_least 7.5; then
+        export UV_TORCH_BACKEND=auto
+        return 0
+    fi
+
+    export UV_TORCH_BACKEND=cu126
+    warn "Compute capability $GPU_CAP predates Turing — pinning a CUDA 12.6 torch,"
+    warn "since recent wheels carry no kernels for it. Expect SDPA attention and"
+    warn "fp32 rather than bf16. This combination is untested; if it misbehaves,"
+    warn "'python -m vui.doctor' reports what was actually resolved."
+}
+
+# ---------------------------------------------------------------- ffmpeg libs
+#
+# torchcodec dlopens libtorchcodec_core{4..8}.so — one per ffmpeg major — and
+# each NEEDEDs one generation's sonames (core7 -> libavcodec.so.61, ...). So the
+# dependency is the ffmpeg *shared libraries*, not the binary: Vui never shells
+# out to ffmpeg. A static ffmpeg on PATH satisfies `command -v` and still leaves
+# torchcodec broken, which is why we test by importing it instead.
+#
+# vui/__init__.py preloads whatever lands in $VUI_FFMPEG_DIR, so no
+# LD_LIBRARY_PATH is needed for processes the user starts later by hand.
+
+FFMPEG_DIR="${VUI_FFMPEG_DIR:-$HOME/.cache/vui/ffmpeg}"
+FFMPEG_VER="${VUI_FFMPEG_VERSION:-7.1}"
+
+FFMPEG_CHECK="import vui.ffmpeg_libs as m; raise SystemExit(m.selftest())"
+torchcodec_ok() { uv run python -c "$FFMPEG_CHECK" >/dev/null 2>&1; }
+
+ensure_ffmpeg_libs() {
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        log "Would verify torchcodec can load ffmpeg; fetch into $FFMPEG_DIR if not."
+        return 0
+    fi
+
+    if torchcodec_ok; then
+        log "ffmpeg OK ($(uv run python -c "$FFMPEG_CHECK" 2>/dev/null))"
+        return 0
+    fi
+
+    if [[ "$OS" != "Linux" ]]; then
+        die "torchcodec can't load ffmpeg. On macOS: brew install ffmpeg"
+    fi
+
+    local tag
+    case "$ARCH" in
+        x86_64)          tag="linux64" ;;
+        aarch64|arm64)   tag="linuxarm64" ;;
+        *) die "No prebuilt ffmpeg for $ARCH. Install ffmpeg, or build one — see docs/rootless-install.md" ;;
+    esac
+
+    local asset="ffmpeg-n${FFMPEG_VER}-latest-${tag}-lgpl-shared-${FFMPEG_VER}.tar.xz"
+    local url="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/${asset}"
+    local tmp="${FFMPEG_DIR}.tmp.$$"
+
+    log "No usable ffmpeg — fetching shared libs into $FFMPEG_DIR (~170 MB)..."
+    mkdir -p "$tmp"
+    # Extract to a temp dir and mv, so an interrupted fetch can't leave a
+    # half-populated dir that the preload would happily find.
+    if ! curl -fL --retry 3 "$url" | tar -xJ --strip-components=1 -C "$tmp"; then
+        rm -rf "$tmp"
+        die "ffmpeg download failed: $url
+   Install ffmpeg yourself, point VUI_FFMPEG_DIR at an existing prefix, or
+   build one — see docs/rootless-install.md"
+    fi
+    rm -rf "$FFMPEG_DIR"
+    mkdir -p "$(dirname "$FFMPEG_DIR")"
+    mv "$tmp" "$FFMPEG_DIR"
+    echo "$FFMPEG_VER" > "$FFMPEG_DIR/.vui-version"
+
+    torchcodec_ok || die "Fetched ffmpeg into $FFMPEG_DIR but torchcodec still can't load it.
+   Details: $(uv run python -c "$FFMPEG_CHECK" 2>&1 | tail -2)
+   This usually means the prebuilt libs need a newer glibc than this host has.
+   Build ffmpeg from source instead — see docs/rootless-install.md"
+    log "ffmpeg ready in $FFMPEG_DIR"
+}
 
 check_claude_creds() {
     [[ "$WITH_CLAUDE" -eq 1 ]] || return 0
@@ -156,6 +320,8 @@ check_claude_creds() {
 
 run_docker() {
     log "Using docker compose path."
+    # The bundled compose stack is Ollama-based.
+    [[ -z "$MODEL" ]] && MODEL="qwen3.5:4b"
     check_claude_creds
 
     local profiles=() services=(vui-stream)
@@ -187,55 +353,68 @@ run_docker() {
 }
 
 run_native() {
-    log "Using native (no-Docker) path."
+    log "Using native (no-Docker, no-sudo) path."
 
-    if ! command -v ffmpeg >/dev/null 2>&1; then
-        case "$OS" in
-            Linux)  die "ffmpeg not found. Install: sudo apt install ffmpeg" ;;
-            Darwin) die "ffmpeg not found. Install: brew install ffmpeg" ;;
-            *)      die "ffmpeg not found and unknown OS ($OS) — install it manually." ;;
-        esac
-    fi
+    # Do this once, unconditionally: everything we install lands here, and a
+    # second run must be able to see what the first one did even if the user's
+    # login PATH doesn't include it.
+    export PATH="$HOME/.local/bin:$PATH"
 
     if ! command -v uv >/dev/null 2>&1; then
         log "Installing uv..."
         run "curl -LsSf https://astral.sh/uv/install.sh | sh"
-        export PATH="$HOME/.local/bin:$PATH"
         command -v uv >/dev/null 2>&1 || die "uv install failed — add ~/.local/bin to PATH and retry."
     fi
 
-    if ! command -v ollama >/dev/null 2>&1; then
-        log "Installing Ollama CLI..."
-        case "$OS" in
-            Linux)  run "curl -fsSL https://ollama.com/install.sh | sh" ;;
-            Darwin) die "Ollama not found. Install from https://ollama.com/download or: brew install --cask ollama" ;;
-            *)      die "Unknown OS ($OS) — install Ollama manually." ;;
-        esac
-    fi
+    detect_gpu
+    resolve_torch_backend
 
     local extras=()
     [[ "$OS" == "Darwin" && "$ARCH" == "arm64" ]] && extras+=(--extra mlx)
-    log "Syncing Python env (${extras[*]:-base})..."
-    run "uv sync ${extras[*]}"
-
-    if ollama_up; then
-        log "Ollama already up at $OLLAMA_URL_RESOLVED"
-    elif [[ "$REMOTE_OLLAMA" -eq 1 ]]; then
-        die "OLLAMA_HOST=$RAW_HOST is set but unreachable at $OLLAMA_URL_RESOLVED."
-    else
-        log "Starting ollama serve in the background..."
-        if [[ "$DRY_RUN" -eq 0 ]]; then
-            nohup ollama serve >/tmp/vui-ollama.log 2>&1 &
-            for _ in $(seq 1 20); do
-                sleep 0.5
-                ollama_up && break
-            done
-            ollama_up || die "ollama serve didn't come up — see /tmp/vui-ollama.log"
-        fi
+    # flash-attn only where its kernels exist (Ampere+). Below that
+    # vui.flash_compat uses SDPA, so installing it would just waste the
+    # download.
+    if cap_at_least 8.0; then
+        extras+=(--extra flash)
+    elif [[ -n "$GPU_CAP" ]]; then
+        log "Skipping flash-attn (needs compute 8.0+, this GPU is $GPU_CAP) — using SDPA."
     fi
 
-    log "Pulling Ollama model: $MODEL"
-    run "ollama pull '$MODEL'"
+    log "Syncing Python env (${extras[*]:-base})${UV_TORCH_BACKEND:+, torch=$UV_TORCH_BACKEND}..."
+    run "uv sync ${extras[*]}"
+
+    # After uv sync: the only honest ffmpeg test is importing torchcodec, which
+    # has to be installed first.
+    ensure_ffmpeg_libs
+
+    resolve_llm_backend
+    if [[ "$LLM_BACKEND" == "ollama" ]]; then
+        [[ -z "$MODEL" ]] && MODEL="qwen3.5:4b"
+        if ollama_up; then
+            log "Using the Ollama already running at $OLLAMA_URL_RESOLVED"
+            log "Pulling Ollama model: $MODEL"
+            run "ollama pull '$MODEL'"
+        else
+            # We never install Ollama — its installer needs root.
+            warn "Backend is ollama but nothing is listening at $OLLAMA_URL_RESOLVED."
+            warn "Start it (ollama serve), or use --llm vllm. Continuing without an LLM."
+        fi
+    else
+        [[ -z "$MODEL" ]] && MODEL="google/gemma-4-E4B-it"
+        if vllm_up; then
+            log "Using the vLLM already running at $VLLM_URL_RESOLVED"
+        else
+            warn "No LLM at $VLLM_URL_RESOLVED. TTS and ASR work without one; the"
+            warn "llm pill turns green on its own once a backend appears. Start one with:"
+            warn "  uv run --with 'vllm==0.26.0' python -m vllm.entrypoints.openai.api_server \\"
+            warn "      --model $MODEL --max-model-len 8192 \\"
+            warn "      --max-num-seqs 1 --enforce-eager --gpu-memory-utilization 0.6 \\"
+            warn "      --enable-auto-tool-choice --tool-call-parser gemma4 --port 8000"
+            warn "--max-num-seqs 1 + --enforce-eager keep the KV pool and CUDA graphs to"
+            warn "one request's worth; --gpu-memory-utilization leaves the rest of the"
+            warn "card for the TTS/ASR workers. See docs/rootless-install.md."
+        fi
+    fi
 
     if [[ "$WITH_CLAUDE" -eq 1 ]]; then
         if ! command -v claude >/dev/null 2>&1 && [[ ! -x "$HOME/.local/bin/claude" ]]; then
@@ -244,14 +423,18 @@ run_native() {
                 Linux|Darwin) run "curl -fsSL https://claude.ai/install.sh | bash" ;;
                 *) warn "Unknown OS ($OS) — install Claude Code manually." ;;
             esac
-            export PATH="$HOME/.local/bin:$PATH"
         fi
     fi
     check_claude_creds
 
     if [[ "$LAUNCH" -eq 0 || "$DRY_RUN" -eq 1 ]]; then
         log "Setup done."
-        log "  Stream: VUI_OLLAMA_MODEL=$MODEL VUI_OLLAMA_URL=$OLLAMA_URL_RESOLVED uv run python -m vui.serving.stream"
+        [[ "$DRY_RUN" -eq 0 ]] && uv run python -m vui.doctor || true
+        if [[ "$LLM_BACKEND" == "ollama" ]]; then
+            log "  Stream: VUI_OLLAMA_MODEL=$MODEL VUI_OLLAMA_URL=$OLLAMA_URL_RESOLVED uv run python -m vui.serving.stream"
+        else
+            log "  Stream: VUI_LLM_BACKEND=vllm VUI_VLLM_MODEL=$MODEL VUI_VLLM_URL=$VLLM_URL_RESOLVED uv run python -m vui.serving.stream"
+        fi
         [[ "$WITH_CLAUDE" -eq 1 ]] && log "  Claude task: uv run python -m vui.serving.claude_server"
         exit 0
     fi
@@ -266,10 +449,20 @@ run_native() {
         CLAUDE_PID=$!
     fi
 
+    # Surface hardware/ffmpeg/LLM problems here rather than as a stack trace
+    # three minutes into model loading. Non-fatal: the report is advisory.
+    uv run python -m vui.doctor || true
+
     log "Starting Vui streaming server on http://localhost:8080 ..."
-    export VUI_OLLAMA_MODEL="$MODEL"
-    export VUI_OLLAMA_URL="$OLLAMA_URL_RESOLVED"
-    export OLLAMA_URL="$OLLAMA_URL_RESOLVED"
+    export VUI_LLM_BACKEND="$LLM_BACKEND"
+    if [[ "$LLM_BACKEND" == "ollama" ]]; then
+        export VUI_OLLAMA_MODEL="$MODEL"
+        export VUI_OLLAMA_URL="$OLLAMA_URL_RESOLVED"
+        export OLLAMA_URL="$OLLAMA_URL_RESOLVED"
+    else
+        export VUI_VLLM_MODEL="$MODEL"
+        export VUI_VLLM_URL="$VLLM_URL_RESOLVED"
+    fi
     uv run python -m vui.serving.stream
 }
 

@@ -519,7 +519,6 @@ async def _voice_respond_body(
             else llm_stream_chunks(
                 conv,
                 sys_prompt,
-                srv.ollama_model,
                 max_words=chunk_w,
                 stats=llm_stats,
             )
@@ -616,7 +615,7 @@ async def _voice_respond_body(
                 srv._log_conv(
                     "llm_reply_truncated",
                     text=heard_text,
-                    model=srv.ollama_model,
+                    model=srv.llm_model,
                 )
                 _slog(
                     f"[main.turn] kept LLM-streamed reply ({len(heard_text)}c, "
@@ -629,7 +628,7 @@ async def _voice_respond_body(
     await srv._flush_pending_done()
     reply_text = " ".join(full_reply)
     append_turn(srv, "assistant", reply_text)
-    srv._log_conv("llm_reply", text=reply_text, model=srv.ollama_model)
+    srv._log_conv("llm_reply", text=reply_text, model=srv.llm_model)
 
     srv.session.ready = not srv._ready_blockers
 
@@ -919,7 +918,6 @@ async def stream_llm_to_tts(
         async for chunk_text, is_done in llm_stream_chunks(
             conv,
             effective_prompt,
-            srv.ollama_model,
             max_words=chunk_w,
             stats=llm_stats,
         ):

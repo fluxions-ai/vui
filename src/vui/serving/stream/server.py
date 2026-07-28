@@ -337,7 +337,6 @@ class StreamServer:
         self._asr_backend_set_event: asyncio.Event | None = None
         self._asr_backend_set_result: dict | None = None
 
-        self.ollama_model = DEFAULT_OLLAMA_MODEL
         self._warmup_done = False
         self._server_vad = True
 
@@ -479,6 +478,18 @@ class StreamServer:
         from vui.serving.stream.thoughts import ThoughtsStream
 
         self._thoughts = ThoughtsStream(self)
+
+    @property
+    def llm_model(self) -> str:
+        """The model that will actually answer.
+
+        Derived from the backend rather than stored, so the label can't drift
+        from reality — which is what used to make the UI's model switch look
+        like it worked while the previous model kept replying.
+        """
+        from vui.serving.stream.llm_backend import get_backend
+
+        return get_backend().model
 
     def _log_conv(self, event: str, **data):
         import time as _time
@@ -896,9 +907,13 @@ class StreamServer:
         app.router.add_post("/load-prompt", self.handle_load_prompt)
         app.router.add_post("/reset", self.handle_reset)
         app.router.add_post("/cancel", self.handle_cancel)
-        app.router.add_get("/ollama/models", self.handle_ollama_models)
-        app.router.add_post("/ollama/model", self.handle_ollama_set_model)
-        app.router.add_post("/ollama/pull", self.handle_ollama_pull)
+        app.router.add_get("/llm/models", self.handle_llm_models)
+        app.router.add_post("/llm/model", self.handle_llm_set_model)
+        app.router.add_post("/llm/pull", self.handle_llm_pull)
+        # Deprecated aliases — kept one release for anything holding the old paths.
+        app.router.add_get("/ollama/models", self.handle_llm_models)
+        app.router.add_post("/ollama/model", self.handle_llm_set_model)
+        app.router.add_post("/ollama/pull", self.handle_llm_pull)
         app.router.add_get("/asr/models", self.handle_asr_models)
         app.router.add_post("/asr/model", self.handle_asr_set_model)
         app.router.add_get("/prompt-audio", self.handle_prompt_audio)
@@ -1036,6 +1051,22 @@ def main():
         )
     else:
         print("[telemetry] disabled (VUI_TELEMETRY=0)", file=sys.stderr)
+
+    # Resolve the LLM backend up front. get_backend() is otherwise first called
+    # from inside a spawned warmup task, where a bad VUI_LLM_BACKEND surfaces as
+    # a swallowed background exception instead of a clean startup error.
+    from vui.serving.stream.llm_backend import get_backend
+
+    try:
+        _backend = get_backend()
+    except ValueError as e:
+        print(f"[main] {e}", file=sys.stderr)
+        sys.exit(2)
+    print(
+        f"[main] LLM backend: {_backend.name} "
+        f"model={_backend.model} url={_backend.base_url}",
+        file=sys.stderr,
+    )
 
     checkpoint_path = sys.argv[1] if len(sys.argv) > 1 else "vui-nano.safetensors"
     from vui.hf import download

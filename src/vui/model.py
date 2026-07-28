@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
+from vui import hardware
 from vui.config import Config, VuiConfig
 from vui.rope import apply_rotary_emb, precompute_freqs_cis
 from vui.tokenizer import VuiTokenizer
@@ -46,9 +47,10 @@ class KVCache(nn.Module):
         max_seqlen: int,
         n_kv_heads: int,
         head_dim: int,
-        dtype: torch.dtype = torch.bfloat16,
+        dtype: torch.dtype | None = None,
     ):
         super().__init__()
+        dtype = dtype or hardware.dtype()
 
         cache_shape = (batch_size, n_kv_heads, max_seqlen, head_dim)
 
@@ -77,10 +79,11 @@ class FlashKVCache(nn.Module):
         max_seqlen: int,
         n_kv_heads: int,
         head_dim: int,
-        dtype: torch.dtype = torch.bfloat16,
+        dtype: torch.dtype | None = None,
         device=None,
     ):
         super().__init__()
+        dtype = dtype or hardware.dtype()
         self.register_buffer(
             "k_cache",
             torch.zeros(
@@ -474,9 +477,10 @@ class Decoder(nn.Module):
         self,
         batch_size: int,
         device,
-        dtype=torch.bfloat16,
+        dtype=None,
         max_seqlen: int | None = None,
     ):
+        dtype = dtype or hardware.dtype()
         seqlen = max_seqlen or self.max_seqlen
         self.flash_kv_caches = [
             FlashKVCache(
@@ -814,7 +818,7 @@ class RQTransformer(nn.Module):
     def setup_cuda_graph_kv(
         self,
         device,
-        dtype=torch.bfloat16,
+        dtype=None,
         top_k: int = 100,
         pool=None,
         batch_sizes: tuple[int, ...] = (1,),
@@ -1223,7 +1227,8 @@ class Vui(nn.Module):
         checkpoint_path: str | dict,
         **config_kwargs,
     ):
-        return Vui.from_pretrained(checkpoint_path, **config_kwargs).bfloat16().eval()
+        model = Vui.from_pretrained(checkpoint_path, **config_kwargs)
+        return model.to(hardware.dtype()).eval()
 
     def setup_decode_graph(self, pool=None):
         device = self.device
@@ -1265,17 +1270,19 @@ class Vui(nn.Module):
         device = self.device
         dtype = self._cond_bias.dtype
         if sq_scores is not None and self.sq_proj is not None:
-            sq_val = torch.tensor([sq_scores], device=device, dtype=torch.bfloat16)
+            sq_val = torch.tensor([sq_scores], device=device, dtype=dtype)
             self._cond_bias.add_(self.sq_proj(sq_val).reshape(1, 1, -1).to(dtype))
         if wps_score > 0 and self.wps_proj is not None:
-            wps_val = torch.tensor([wps_score], device=device, dtype=torch.bfloat16)
+            wps_val = torch.tensor([wps_score], device=device, dtype=dtype)
             self._cond_bias.add_(
                 self.wps_proj(wps_val).squeeze(1).reshape(1, 1, -1).to(dtype)
             )
 
     def embed_speaker(self, spk_emb: Tensor) -> Tensor:
         """Project speaker embedding to a single (1, 1, d_model) token for prefill."""
-        return self.spk_proj(spk_emb.to(self.device, torch.bfloat16)).reshape(1, 1, -1)
+        return self.spk_proj(
+            spk_emb.to(self.device, self.spk_proj.weight.dtype)
+        ).reshape(1, 1, -1)
 
     def _decode_step_inner(self):
         codes = self._decode_code_in  # (Q,)

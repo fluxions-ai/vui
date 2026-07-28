@@ -25,7 +25,7 @@ from collections.abc import AsyncIterator
 import httpx
 
 DEFAULT_OLLAMA_MODEL = "qwen3.5:4b"
-DEFAULT_VLLM_MODEL = "Qwen/Qwen3.5-4B"
+DEFAULT_VLLM_MODEL = "google/gemma-4-E4B-it"
 
 # Sampling defaults — mirrors the qwen3.5:4b ollama modelfile so vLLM and
 # ollama produce comparable replies. vLLM has no equivalent of a modelfile;
@@ -42,6 +42,12 @@ DEFAULT_SAMPLING = {
 
 class LLMBackend:
     name: str = "abstract"
+
+    # Capabilities the UI keys off, so callers don't have to test `name`.
+    # Can the served model be swapped at runtime?
+    supports_model_switch: bool = False
+    # Is there a registry to fetch a model the server doesn't have yet?
+    supports_pull: bool = False
 
     def __init__(self, model: str, base_url: str, sampling: dict | None = None):
         self.model = model
@@ -121,17 +127,33 @@ class LLMBackend:
         """Warm KV cache. Default: a 1-token completion. Backends can override."""
         await self.complete(messages, max_tokens=1, temperature=0.0)
 
+    async def health(self) -> bool:
+        """Cheap liveness probe. Must not load a model or generate tokens."""
+        return True
+
     async def list_models(self) -> list[str]:
+        """Models this backend can be switched to."""
         return [self.model]
+
+    async def loaded_models(self) -> list[str]:
+        """Models the server currently holds in memory, most-recent first."""
+        return []
 
     async def set_model(self, name: str) -> None:
         raise NotImplementedError(
             f"{self.name} backend does not support runtime model switch"
         )
 
+    async def pull(self, name: str) -> AsyncIterator[dict]:
+        """Yield {status, completed, total} progress dicts."""
+        raise NotImplementedError(f"{self.name} backend has no model registry")
+        yield {}  # pragma: no cover — makes this an async generator
+
 
 class OllamaBackend(LLMBackend):
     name = "ollama"
+    supports_model_switch = True
+    supports_pull = True
 
     def __init__(
         self,
@@ -302,22 +324,79 @@ class OllamaBackend(LLMBackend):
             "done_reason": d.get("done_reason"),
         }
 
+    async def health(self) -> bool:
+        try:
+            r = await self._client_inst().get(f"{self.base_url}/api/version", timeout=3)
+            return r.status_code == 200
+        except Exception:
+            return False
+
     async def list_models(self) -> list[str]:
+        # /api/tags = installed. What the UI dropdown offers.
         client = self._client_inst()
         try:
-            r = await client.get(f"{self.base_url}/api/ps", timeout=5)
+            r = await client.get(f"{self.base_url}/api/tags", timeout=5)
+            r.raise_for_status()
             return [
                 m.get("name", "") for m in r.json().get("models", []) if m.get("name")
             ]
         except Exception:
+            # Fall back to the current model rather than an empty dropdown.
             return [self.model]
 
+    async def loaded_models(self) -> list[str]:
+        # /api/ps = resident in VRAM right now. Not the same list as above.
+        client = self._client_inst()
+        try:
+            r = await client.get(f"{self.base_url}/api/ps", timeout=5)
+            r.raise_for_status()
+            return [
+                m.get("name", "") for m in r.json().get("models", []) if m.get("name")
+            ]
+        except Exception:
+            return []
+
     async def set_model(self, name: str) -> None:
+        if name == self.model:
+            return
+        # Free the VRAM the outgoing model holds; best-effort, Ollama will
+        # evict on its own eventually.
+        try:
+            await self._client_inst().post(
+                f"{self.base_url}/api/generate",
+                json={"model": self.model, "keep_alive": 0},
+                timeout=10,
+            )
+        except Exception:
+            pass
         self.model = name
+
+    async def pull(self, name: str) -> AsyncIterator[dict]:
+        client = self._client_inst()
+        async with client.stream(
+            "POST",
+            f"{self.base_url}/api/pull",
+            json={"model": name, "stream": True},
+            timeout=None,
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.strip():
+                    continue
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    continue
 
 
 class VLLMBackend(LLMBackend):
     name = "vllm"
+    # A real vLLM serves one model per process, so list_models() returns a
+    # single id and the dropdown is effectively fixed. But this backend is also
+    # the generic OpenAI-compatible one (sglang, LM Studio, LiteLLM, a router),
+    # where several models may be served — so allow the switch and validate it.
+    supports_model_switch = True
+    supports_pull = False
 
     def __init__(
         self,
@@ -492,13 +571,38 @@ class VLLMBackend(LLMBackend):
             "done_reason": choice.get("finish_reason"),
         }
 
+    async def health(self) -> bool:
+        # /v1/models rather than /health: portable across every
+        # OpenAI-compatible server. 401/403 still prove one is listening — but
+        # a 404 means whatever is on this port isn't an OpenAI-compatible API,
+        # which is a misconfiguration, not a healthy backend.
+        try:
+            r = await self._client_inst().get(f"{self.base_url}/v1/models", timeout=3)
+            return r.status_code in (200, 401, 403)
+        except Exception:
+            return False
+
     async def list_models(self) -> list[str]:
         client = self._client_inst()
         try:
             r = await client.get(f"{self.base_url}/v1/models", timeout=5)
+            r.raise_for_status()
             return [m.get("id", "") for m in r.json().get("data", []) if m.get("id")]
         except Exception:
             return [self.model]
+
+    async def loaded_models(self) -> list[str]:
+        # Whatever it serves is loaded — there's no separate resident set.
+        return await self.list_models()
+
+    async def set_model(self, name: str) -> None:
+        served = await self.list_models()
+        if name not in served:
+            raise ValueError(
+                f"{name!r} is not served by this endpoint (has: {', '.join(served)}). "
+                "vLLM serves one model per process — restart it with --model to change."
+            )
+        self.model = name
 
 
 def make_backend(name: str | None = None, model: str | None = None) -> LLMBackend:
@@ -511,9 +615,14 @@ def make_backend(name: str | None = None, model: str | None = None) -> LLMBacken
     if name == "ollama":
         return OllamaBackend(
             model=model or os.environ.get("VUI_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL),
-            base_url=os.environ.get("VUI_OLLAMA_URL", "http://localhost:11434"),
+            # VUI_OLLAMA_URL wins; bare OLLAMA_URL is honoured so the two names
+            # that used to diverge now mean the same thing.
+            base_url=os.environ.get("VUI_OLLAMA_URL")
+            or os.environ.get("OLLAMA_URL", "http://localhost:11434"),
         )
-    raise ValueError(f"unknown VUI_LLM_BACKEND: {name!r}")
+    raise ValueError(
+        f"unknown VUI_LLM_BACKEND: {name!r} (expected 'ollama' or 'vllm')"
+    )
 
 
 _BACKEND: LLMBackend | None = None

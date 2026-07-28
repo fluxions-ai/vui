@@ -39,15 +39,31 @@ dependencies = [
     # Claude task delegation server (always installed — `claude_server.py`
     # imports it at module load).
     "claude-agent-sdk>=0.1.70",
-    # CUDA flash-attn — Linux. Pre-built wheels (x86_64 + aarch64) via [tool.uv.sources].
-    # Install with `uv` (not pip — pip ignores [tool.uv.sources] and tries to source-build).
-    "flash-attn ; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+    # NOTE: flash-attn is deliberately NOT here — see the `flash` extra below.
     # ctranslate2 (faster-whisper) dlopens libcublas.so.12 at import time;
     # torch brings cu13. This supplies the cu12 ABI ctranslate2 needs.
     "nvidia-cublas-cu12 ; sys_platform == 'linux'",
 ]
 
+[dependency-groups]
+# `uv sync` installs these by default; `--no-dev` skips them.
+dev = [
+    "pytest",
+    "pytest-asyncio",   # the backend/route tests are async
+]
+
 [project.optional-dependencies]
+# FlashAttention-2. Optional because the pinned wheels carry cubins for
+# sm_80/90/100/120 and no PTX, so on anything older (Turing sm_75, Volta
+# sm_70) importing it succeeds and the first decode step dies with "no kernel
+# image is available". `vui.flash_compat` covers that with a pure-PyTorch SDPA
+# path, so the kernel is a speedup, not a requirement.
+#
+# `install.sh` adds this extra automatically when it detects compute
+# capability >= 8.0. By hand: `uv sync --extra flash`.
+flash = [
+    "flash-attn ; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+]
 mlx = [
     "mlx>=0.18",
     "mlx-whisper>=0.4",
@@ -57,6 +73,16 @@ mlx = [
 moonshine = [
     "moonshine-voice",
 ]
+
+# NOTE: no `[tool.uv] torch-backend` here on purpose. It only exists in recent
+# uv, and uv *errors* on unknown [tool.uv] fields rather than ignoring them — so
+# pinning it would make this project unsyncable on an older uv. `install.sh`
+# exports UV_TORCH_BACKEND instead, which older uv simply ignores.
+#
+# The default build (cu130) already covers sm_75 and up. Auto-selection only
+# matters below Turing, where recent wheels carry no kernels at all:
+#     UV_TORCH_BACKEND=cu126 uv sync     # Volta / Pascal
+# `python -m vui.doctor` tells you if the torch you have can't run your GPU.
 
 [tool.uv.sources]
 # Pre-built wheels from a community mirror — avoids the (slow + fragile) source
@@ -77,3 +103,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "vui.serving.stream" = ["index.html", "silero_vad.onnx"]
+
+[tool.pytest.ini_options]
+# The backend and route tests are `async def` with no explicit marker.
+asyncio_mode = "auto"
