@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Runs on more than Ampere-and-newer.** The model hardcoded bf16 and the
+  install hardcoded FlashAttention-2, so anything below compute capability 8.0
+  failed — bf16 with no native support, and a flash-attn wheel whose cubins are
+  `sm_80/90/100/120` with no PTX, which dies at the first decode step. Now:
+  - New `vui.hardware` resolves dtype from the device: bf16 at 8.0+, fp16 on
+    Turing/Volta, fp32 off-GPU. Override with `VUI_DTYPE=bf16|fp16|fp32`. The
+    13 hardcoded `torch.bfloat16` sites now go through it.
+  - `vui.flash_compat` checks compute capability on the first call and goes
+    straight to SDPA below 8.0, instead of letting a kernel launch fail and
+    catching the error. The launch-error catch stays as a backstop for Jetson,
+    where the capability looks fine but the wheel has no matching cubin.
+  - **flash-attn is now an optional extra** (`uv sync --extra flash`) rather
+    than a hard dependency, since the SDPA path is a correct substitute.
+    `install.sh` adds it only at 8.0+.
+  - `pyproject.toml` sets `[tool.uv] torch-backend = "auto"`, so `uv sync`
+    picks the CUDA build from the driver. That resolves from the driver
+    version, not the compute capability, so `install.sh` still pins `cu126` for
+    pre-Turing cards, whose kernels recent wheels omit entirely.
+- **`python -m vui.doctor`** — preflight report: GPU and compute capability,
+  whether the installed torch has kernels for it, resolved dtype, active
+  attention path, whether torchcodec can load ffmpeg, LLM reachability, and
+  free disk — each with a remedy. Non-zero exit only for blocking problems.
+  `install.sh` runs it before starting the server, so hardware mismatches
+  surface immediately rather than minutes into model loading.
+- `tests/test_hardware.py` — dtype selection and attention dispatch across
+  faked compute capabilities (Volta through Blackwell), so the decisions that
+  need a shelf of old GPUs to exercise are covered on any box.
+
 - **Rootless install — `./install.sh --native` now needs no sudo and no Docker.**
   See [`docs/rootless-install.md`](docs/rootless-install.md). Two things used to
   require root, and one of them was a mistake:

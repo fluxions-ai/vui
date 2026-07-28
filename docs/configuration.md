@@ -256,6 +256,9 @@ environment:
 | `VUI_OLLAMA_MODEL` | `qwen3.5:4b` | Initial Ollama model. UI can switch live. |
 | `VUI_VLLM_URL` | `http://localhost:8000` | vLLM (or OpenAI-compatible) base URL. |
 | `VUI_VLLM_MODEL` | `google/gemma-4-E4B-it` | Model id sent to vLLM. |
+| `VUI_DTYPE` | auto | Force the model dtype: `bf16`, `fp16`, `fp32`. Auto-selects bf16 on compute 8.0+, fp16 below that, fp32 without CUDA. Use `fp32` if fp16's narrower exponent range produces NaNs. |
+| `VUI_ATTN` | auto | `torch` (or `sdpa`) forces the pure-PyTorch attention fallback instead of FlashAttention-2. Auto-selected anyway below compute 8.0. |
+| `UV_TORCH_BACKEND` | `auto` | Which CUDA build of torch `uv sync` installs (`auto`, `cu126`, `cu128`, `cu130`, `cpu`, …). `auto` resolves from the driver; pre-Turing GPUs need `cu126` explicitly. |
 | `VUI_ASR` | `moonshine` | Initial ASR backend if no model key is requested: `moonshine`, `fwhisper`, `mlx_whisper`. |
 | `VUI_MOONSHINE_ARCH` | `4` | Moonshine variant: `0` tiny, `2` tiny-streaming, `4` small-streaming, `5` medium-streaming. |
 | `VUI_FWHISPER_MODEL` | `distil-small.en` | faster-whisper model id. |
