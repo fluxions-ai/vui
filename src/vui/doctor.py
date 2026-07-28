@@ -90,16 +90,22 @@ def _check_torch(rep: Report) -> None:
     note = f"{str(d).replace('torch.', '')}"
     if forced:
         rep.add(OK, "dtype", f"{note} (forced by VUI_DTYPE={forced})")
-    elif hardware.supports_bf16():
+    elif hardware.bf16_is_native():
         rep.add(OK, "dtype", f"{note} (native bf16)")
+    elif hardware.supports_bf16():
+        rep.add(
+            OK,
+            "dtype",
+            f"{note} (emulated — no hardware bf16 below compute 8.0)",
+        )
     else:
         rep.add(
             WARN,
             "dtype",
-            f"{note} — no native bf16 below compute 8.0",
-            "fp32 is correct but ~7x slower than bf16+flash; expect well under\n"
-            "that here. fp16 would be faster but this model's activations overflow\n"
-            "its range and the decode crashes, so it isn't chosen automatically.",
+            f"{note} — this device reports no bf16 support at all",
+            "fp32 is correct but slower. fp16 would be faster still, but this\n"
+            "model's activations overflow its range and the decode crashes,\n"
+            "so it is never chosen automatically.",
         )
 
 
@@ -209,6 +215,11 @@ def _check_disk(rep: Report) -> None:
         return
     # Weights + CUDA wheels + an LLM land in $HOME; quotas bite before root does
     # on the shared boxes this tends to run on.
+    if free_gb > 1e6:
+        # Overlay/network filesystems (Modal, some containers) report a
+        # meaningless free figure; don't print "9223372037 GB".
+        rep.add(OK, "disk", f"{home} (size not reportable on this filesystem)")
+        return
     if free_gb < 15:
         rep.add(
             WARN,
