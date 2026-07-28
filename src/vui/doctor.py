@@ -78,7 +78,12 @@ def _check_torch(rep: Report) -> None:
             "  UV_TORCH_BACKEND=cu126 uv sync",
         )
     else:
-        rep.add(OK, "torch kernels", f"sm_{cap[0]}{cap[1]} in {arches}")
+        mine = f"sm_{cap[0]}{cap[1]}"
+        # Say "compatible with", not "in": cubins are forward-compatible within
+        # a major generation, so sm_89 runs on an sm_86 build and the exact
+        # name often isn't in the list at all.
+        how = "built for" if mine in arches else "compatible with"
+        rep.add(OK, "torch kernels", f"{mine} {how}: {arches}")
 
     d = hardware.dtype()
     forced = os.environ.get("VUI_DTYPE", "").strip()
@@ -92,7 +97,9 @@ def _check_torch(rep: Report) -> None:
             WARN,
             "dtype",
             f"{note} — no native bf16 below compute 8.0",
-            "fp16 has a smaller exponent range; if you see NaNs, try VUI_DTYPE=fp32.",
+            "fp32 is correct but ~7x slower than bf16+flash; expect well under\n"
+            "that here. fp16 would be faster but this model's activations overflow\n"
+            "its range and the decode crashes, so it isn't chosen automatically.",
         )
 
 

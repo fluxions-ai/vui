@@ -57,8 +57,10 @@ def _resolve_dtype(cap, env=None):
         ((9, 0), torch.bfloat16),  # Hopper H100
         ((8, 6), torch.bfloat16),  # RTX 3090
         ((8, 0), torch.bfloat16),  # Ampere A100 — the bf16 floor
-        ((7, 5), torch.float16),  # Turing T4: no native bf16
-        ((7, 0), torch.float16),  # Volta V100
+        # Not fp16: this model's activations overflow fp16's range and the
+        # decode dies in scatter_add_. Verified on a 4090 with VUI_DTYPE=fp16.
+        ((7, 5), torch.float32),  # Turing T4
+        ((7, 0), torch.float32),  # Volta V100
         (None, torch.float32),  # CPU
     ],
 )
@@ -72,8 +74,8 @@ def test_dtype_follows_compute_capability(cap, expected):
     ("fp32", torch.float32),
 ])
 def test_vui_dtype_overrides_detection(forced, expected):
-    """The override wins even where the hardware disagrees — it's the escape
-    hatch for fp16 NaNs and for testing the other paths."""
+    """The override wins even where the hardware disagrees — it's how the
+    other paths get exercised on whatever card you happen to have."""
     assert _resolve_dtype((7, 0), {"VUI_DTYPE": forced}) is expected
 
 
@@ -154,3 +156,60 @@ def test_capability_check_is_permissive_when_it_cannot_tell():
 
     with mock.patch.object(torch.cuda, "is_available", boom):
         assert fc._capability_permits_flash() is True
+
+
+# --------------------------------------------- torch/GPU kernel compatibility
+
+# Real arch list from torch 2.11.0+cu130.
+CU130_ARCHES = ["sm_75", "sm_80", "sm_86", "sm_90", "sm_100", "sm_120"]
+
+
+@pytest.mark.parametrize(
+    "cap,arches,expected",
+    [
+        # Exact matches.
+        ((8, 0), CU130_ARCHES, True),
+        ((7, 5), CU130_ARCHES, True),
+        # Forward-compatible within a major generation: an sm_86 cubin runs on
+        # an sm_89 device. A 4090 is fine on a build that never names sm_89 —
+        # exact-matching here wrongly reported "no kernels" on real hardware.
+        ((8, 9), CU130_ARCHES, True),
+        ((8, 7), CU130_ARCHES, True),  # Jetson Orin, via sm_86
+        ((12, 1), CU130_ARCHES, True),  # via sm_120
+        # Genuinely absent: no sm_7x below 7.5, no sm_6x at all.
+        ((7, 0), CU130_ARCHES, False),  # Volta — the case that matters
+        ((6, 1), CU130_ARCHES, False),  # Pascal
+        # Backward within a generation is NOT compatible: sm_86 won't run on
+        # an sm_80 device.
+        ((8, 0), ["sm_86"], False),
+        # Embedded PTX JITs forward onto anything at least that capable.
+        ((9, 0), ["sm_80", "compute_80"], True),
+        ((7, 0), ["sm_80", "compute_80"], False),
+    ],
+)
+def test_torch_gpu_compatibility(cap, arches, expected):
+    avail, devcap = _fake_gpu(cap)
+    with avail, devcap, mock.patch.object(torch.cuda, "get_arch_list", lambda: arches):
+        hardware.compute_capability.cache_clear()
+        hardware.torch_supports_this_gpu.cache_clear()
+        assert hardware.torch_supports_this_gpu() is expected
+    hardware.compute_capability.cache_clear()
+    hardware.torch_supports_this_gpu.cache_clear()
+
+
+def test_arch_parsing_handles_two_digit_majors():
+    assert hardware._parse_arch("sm_86") == (8, 6)
+    assert hardware._parse_arch("sm_100") == (10, 0)
+    assert hardware._parse_arch("sm_120") == (12, 0)
+    assert hardware._parse_arch("compute_90") == (9, 0)
+    assert hardware._parse_arch("junk") is None
+
+
+def test_flash_rejects_fp32_inputs():
+    """flash-attn raises on fp32, which is reachable any time the model runs in
+    fp32 on a card that would otherwise use the kernel."""
+    import vui.flash_compat as fc
+
+    assert fc._dtype_permits_flash(torch.zeros(1, dtype=torch.bfloat16)) is True
+    assert fc._dtype_permits_flash(torch.zeros(1, dtype=torch.float16)) is True
+    assert fc._dtype_permits_flash(torch.zeros(1, dtype=torch.float32)) is False

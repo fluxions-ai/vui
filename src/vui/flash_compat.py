@@ -188,6 +188,16 @@ def _capability_permits_flash() -> bool:
         return True
 
 
+def _dtype_permits_flash(q) -> bool:
+    """flash-attn takes fp16 and bf16 only.
+
+    It raises "FlashAttention only support fp16 and bf16 data type" on fp32,
+    which is reachable whenever the model runs in fp32 — pre-Ampere, or anyone
+    passing VUI_DTYPE=fp32 on a card that would otherwise use the kernel.
+    """
+    return q.dtype in (torch.float16, torch.bfloat16)
+
+
 def flash_attn_with_kvcache(*args, **kwargs):
     """flash-attn's kernel, degrading to SDPA where it can't run.
 
@@ -207,14 +217,18 @@ def flash_attn_with_kvcache(*args, **kwargs):
 
     if not _checked_capability:
         _checked_capability = True
-        if _impl is not _sdpa_attn_with_kvcache and not _capability_permits_flash():
-            _impl = _sdpa_attn_with_kvcache
-            cap = torch.cuda.get_device_capability()
-            _fallback_notice(
-                f"flash_attn needs compute capability "
-                f">= {_FLASH_MIN_CAPABILITY[0]}.{_FLASH_MIN_CAPABILITY[1]}, "
-                f"this GPU is {cap[0]}.{cap[1]}"
-            )
+        if _impl is not _sdpa_attn_with_kvcache:
+            if not _capability_permits_flash():
+                _impl = _sdpa_attn_with_kvcache
+                cap = torch.cuda.get_device_capability()
+                _fallback_notice(
+                    f"flash_attn needs compute capability "
+                    f">= {_FLASH_MIN_CAPABILITY[0]}.{_FLASH_MIN_CAPABILITY[1]}, "
+                    f"this GPU is {cap[0]}.{cap[1]}"
+                )
+            elif args and hasattr(args[0], "dtype") and not _dtype_permits_flash(args[0]):
+                _impl = _sdpa_attn_with_kvcache
+                _fallback_notice(f"flash_attn does not support {args[0].dtype}")
 
     if _impl is _sdpa_attn_with_kvcache:
         return _sdpa_attn_with_kvcache(*args, **kwargs)

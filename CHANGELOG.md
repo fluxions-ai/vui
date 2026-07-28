@@ -13,9 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   install hardcoded FlashAttention-2, so anything below compute capability 8.0
   failed — bf16 with no native support, and a flash-attn wheel whose cubins are
   `sm_80/90/100/120` with no PTX, which dies at the first decode step. Now:
-  - New `vui.hardware` resolves dtype from the device: bf16 at 8.0+, fp16 on
-    Turing/Volta, fp32 off-GPU. Override with `VUI_DTYPE=bf16|fp16|fp32`. The
-    13 hardcoded `torch.bfloat16` sites now go through it.
+  - New `vui.hardware` resolves dtype from the device: bf16 at 8.0+, fp32
+    below that and off-GPU. Override with `VUI_DTYPE`. The 13 hardcoded
+    `torch.bfloat16` sites now go through it. **Not fp16** below Ampere,
+    despite it being the obvious choice — it keeps bf16's precision but loses
+    most of its exponent range, and this model's activations overflow it: the
+    decode samples out-of-range tokens and dies in `scatter_add_` with a
+    device-side assert. Measured by forcing `VUI_DTYPE=fp16` on a 4090; the
+    weights themselves fit fine (max |w| ~16), so it's activation overflow.
+    fp32 is correct everywhere at roughly 7x the cost of bf16+flash.
   - `vui.flash_compat` checks compute capability on the first call and goes
     straight to SDPA below 8.0, instead of letting a kernel launch fail and
     catching the error. The launch-error catch stays as a backstop for Jetson,
@@ -33,9 +39,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   free disk — each with a remedy. Non-zero exit only for blocking problems.
   `install.sh` runs it before starting the server, so hardware mismatches
   surface immediately rather than minutes into model loading.
-- `tests/test_hardware.py` — dtype selection and attention dispatch across
-  faked compute capabilities (Volta through Blackwell), so the decisions that
-  need a shelf of old GPUs to exercise are covered on any box.
+- `tests/test_hardware.py` — dtype selection, attention dispatch, and
+  torch/GPU kernel compatibility across faked compute capabilities (Volta
+  through Blackwell), so decisions that would otherwise need a shelf of old
+  GPUs are covered on any box.
+- `tests/hardware_matrix.py` — renders the same line under each dtype and
+  attention combination on a real GPU, then transcribes each with Moonshine and
+  scores WER against the input. Statistics alone don't catch garbage audio.
+  On one RTX 4090: bf16+flash WER 0.000 at 8.6x realtime, bf16+SDPA 0.042 at
+  3.2x, fp32+SDPA 0.000 at 1.3x. So the SDPA fallback is sound and fp32 is
+  correct, at roughly 7x the cost of the fast path.
 
 - **Rootless install — `./install.sh --native` now needs no sudo and no Docker.**
   See [`docs/rootless-install.md`](docs/rootless-install.md). Two things used to
@@ -96,6 +109,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vLLM path would never reference. Now gated on the Ollama backend.
 - The `OLLAMA_NUM_PARALLEL` warning (which shells out to
   `systemctl`/`pgrep`/`launchctl`) is likewise gated on Ollama.
+- **`vui.doctor` reported "no kernels for this GPU" on cards that work.** It
+  exact-matched the device against `torch.cuda.get_arch_list()`, but cubins are
+  forward-compatible within a major generation — an `sm_86` kernel runs on an
+  `sm_89` device. Every RTX 4090 and Jetson Orin would have been told its torch
+  was broken. Found by running the check on a 4090.
+- **fp32 + flash-attn crashed** with "FlashAttention only support fp16 and bf16
+  data type", reachable whenever the model runs in fp32 on a card that would
+  otherwise use the kernel. `flash_compat` now checks the input dtype alongside
+  the compute capability and falls back to SDPA.
 - `install.sh --dry-run` could `die` on a host without ffmpeg, so it wasn't
   side-effect-free. `~/.local/bin` is now added to `PATH` unconditionally in
   the native path, rather than only inside the "uv wasn't found" branch — a
