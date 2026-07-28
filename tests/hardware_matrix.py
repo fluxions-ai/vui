@@ -2,8 +2,9 @@
 
 The dtype and attention decisions in `vui.hardware` / `vui.flash_compat` are
 unit-tested against faked capabilities, but that only pins the *decision*. It
-says nothing about whether the model is numerically stable in fp16, or whether
-the SDPA fallback actually sounds like the flash kernel. Those need a GPU.
+says nothing about whether the model is numerically stable in a given dtype, or
+whether the SDPA fallback actually sounds like the flash kernel. Those need a
+GPU — and running this on one is how fp16 was found to be unusable.
 
 This renders one fixed line under each combination, then checks the audio three
 ways: no NaNs and not silence, transcribes it back and scores WER against the
@@ -16,12 +17,12 @@ they cannot be varied within a process.
 
 Usage:
     python tests/hardware_matrix.py                     # all combinations
-    python tests/hardware_matrix.py --dtype fp16        # just one
+    python tests/hardware_matrix.py --dtype fp32        # just one
     python tests/hardware_matrix.py --keep              # leave the wavs
 
-Note fp16 and SDPA can be forced on *any* CUDA card, so an Ampere box can
-exercise the paths a Turing box would take — everything except the absence of
-sm_75 kernels itself.
+Note the dtype and attention can be forced on *any* CUDA card, so an Ampere box
+exercises the paths a Turing box would take — everything short of the missing
+sm_75 kernels themselves.
 """
 
 from __future__ import annotations
@@ -39,11 +40,13 @@ TEXT = (
     "Give it a moment and it starts to make sense."
 )
 
+# fp16 is deliberately absent: this model's activations overflow its range and
+# the decode dies in scatter_add_ with a device-side assert. Run it explicitly
+# with `--dtype fp16` if you're trying to fix that.
 COMBINATIONS = [
     ("bf16", "flash"),
     ("bf16", "torch"),
-    ("fp16", "flash"),
-    ("fp16", "torch"),
+    ("fp32", "torch"),
 ]
 
 
@@ -166,17 +169,35 @@ def _wer(reference: str, hypothesis: str) -> float:
 
 
 def _transcribe(path: str) -> str | None:
-    """Transcribe on CPU with Moonshine — never judge audio by its statistics."""
+    """Transcribe on CPU with Moonshine — never judge audio by its statistics.
+
+    Goes through the repo's own ASR backend rather than moonshine_voice
+    directly, so this keeps working if the upstream API moves.
+    """
+    from torchcodec.decoders import AudioDecoder
+
     try:
-        import moonshine_voice
-    except ImportError:
+        from vui.serving.stream.asr.moonshine import MoonshineBackend
+    except Exception:
         return None
     try:
-        model = _transcribe._model
+        backend = _transcribe._backend
     except AttributeError:
-        model = _transcribe._model = moonshine_voice.load_model("moonshine/small")
+        try:
+            backend = _transcribe._backend = MoonshineBackend(arch=4)
+        except Exception as e:
+            _transcribe._backend = None
+            return f"<moonshine unavailable: {e}>"
+    if backend is None:
+        return None
     try:
-        return moonshine_voice.transcribe(path, model=model)[0]
+        wav = (
+            AudioDecoder(path, sample_rate=16000, num_channels=1)
+            .get_all_samples()
+            .data.squeeze()
+            .numpy()
+        )
+        return backend.transcribe_once(wav, 16000)
     except Exception as e:
         return f"<transcribe failed: {e}>"
 
@@ -202,7 +223,9 @@ def _correlate(a_path: str, b_path: str) -> float | None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--prompt", default="prompts/abraham.wav")
-    ap.add_argument("--dtype", choices=["bf16", "fp16"], help="only this dtype")
+    ap.add_argument(
+        "--dtype", choices=["bf16", "fp16", "fp32"], help="only this dtype"
+    )
     ap.add_argument("--attn", choices=["flash", "torch"], help="only this attention")
     ap.add_argument("--out", default="/tmp/vui-hwmatrix")
     ap.add_argument("--keep", action="store_true", help="keep the rendered wavs")

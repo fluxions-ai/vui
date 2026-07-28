@@ -9,10 +9,13 @@ older card gets "no kernel image is available" at the first decode step.
 Compute capability floors that matter here:
 
     >= 8.0  Ampere+   bf16 native, FlashAttention-2 works
-    7.5     Turing    no native bf16 -> fp16; no FA2 -> SDPA fallback
+    7.5     Turing    no native bf16 -> fp32; no FA2 -> SDPA fallback
     7.0     Volta     as Turing, and needs a cu12 torch build (the cu130
                       wheels carry no sm_70 kernels)
     none    CPU/MPS   fp32
+
+fp32 rather than fp16 below Ampere — see `dtype()` for why that isn't the
+obvious choice it looks like.
 
 Override with `VUI_DTYPE=bf16|fp16|fp32` when the automatic choice is wrong.
 `python -m vui.doctor` prints everything this module resolves.
@@ -80,14 +83,27 @@ def supports_bf16() -> bool:
     return cap is not None and cap >= (8, 0)
 
 
+def _parse_arch(a: str) -> tuple[int, int] | None:
+    """'sm_86' -> (8, 6); 'sm_100' -> (10, 0). Last digit is the minor."""
+    digits = a.removeprefix("sm_").removeprefix("compute_")
+    if not digits.isdigit() or len(digits) < 2:
+        return None
+    return int(digits[:-1]), int(digits[-1])
+
+
 @lru_cache(maxsize=1)
 def torch_supports_this_gpu() -> bool | None:
-    """Does the installed torch carry kernels for this device?
+    """Does the installed torch carry kernels this device can run?
 
-    None when there's no CUDA device to judge. False means the wheel was built
-    without this architecture — e.g. a cu130 build on Volta — which surfaces at
-    the first kernel launch rather than at import, so it's worth saying up
-    front.
+    Not an exact match against `get_arch_list()`: CUDA cubins are
+    forward-compatible *within* a major generation, so an sm_86 kernel runs on
+    an sm_89 device (which is why a 4090 is fine on a build that never names
+    sm_89). Embedded PTX for an equal-or-lower capability also works, via a
+    JIT on first launch.
+
+    None when there's no CUDA device to judge. False means the first kernel
+    launch will fail — the cu130-on-Volta case — which is worth saying up front
+    rather than discovering mid-decode.
     """
     cap = compute_capability()
     if cap is None:
@@ -98,16 +114,35 @@ def torch_supports_this_gpu() -> bool | None:
         return None
     if not arches:
         return None
-    return f"sm_{cap[0]}{cap[1]}" in arches
+
+    for a in arches:
+        parsed = _parse_arch(a)
+        if parsed is None:
+            continue
+        major, minor = parsed
+        if a.startswith("compute_"):
+            # PTX: JIT-able onto anything at least this capable.
+            if (major, minor) <= cap:
+                return True
+        elif major == cap[0] and minor <= cap[1]:
+            return True
+    return False
 
 
 @lru_cache(maxsize=1)
 def dtype() -> torch.dtype:
-    """The dtype to run the model in.
+    """The dtype to run the model in: bf16 where native, else fp32.
 
-    bf16 where it's native, fp16 on older CUDA cards, fp32 off-GPU. fp16 has a
-    much smaller exponent range than bf16, so if you see NaNs on a pre-Ampere
-    card, `VUI_DTYPE=fp32` is the escape hatch.
+    Not fp16 below Ampere, even though that would be the obvious choice. fp16
+    keeps bf16's precision but loses most of its exponent range (max 65504),
+    and this model's activations exceed it: a decode in fp16 produces
+    out-of-range sampled tokens and dies in `scatter_add_` with a device-side
+    assert. Measured on a 4090 with `VUI_DTYPE=fp16` forced; the weights
+    themselves fit fine (max |w| ~16), so it's activation overflow.
+
+    fp32 is correct everywhere and about 7x slower than bf16+flash on the same
+    card, which is the price of running at all on pre-Ampere. `VUI_DTYPE=fp16`
+    is still accepted if you want to experiment with fixing it.
     """
     override = os.environ.get("VUI_DTYPE", "").strip().lower()
     if override:
@@ -123,7 +158,7 @@ def dtype() -> torch.dtype:
         return torch.float32
     if cap >= (8, 0):
         return torch.bfloat16
-    return torch.float16
+    return torch.float32
 
 
 def autocast(enabled: bool = True):
