@@ -103,11 +103,9 @@ def ensure_mlx_model() -> None:
 
 async def llm_prefill_system(
     system_prompt: str,
-    model: str = DEFAULT_OLLAMA_MODEL,  # kept for signature compat; backend owns model
 ) -> None:
     import time as _time
 
-    del model
     backend = get_backend()
     t0 = _time.perf_counter()
     await backend.prefill([{"role": "system", "content": system_prompt}])
@@ -120,10 +118,8 @@ async def llm_prefill_system(
 async def llm_prefill_user(
     conversation: list[dict],
     system_prompt: str = SOUL,
-    model: str = DEFAULT_OLLAMA_MODEL,  # kept for signature compat
 ) -> None:
     """Prefill backend KV cache with conversation so far (no generation)."""
-    del model
     backend = get_backend()
     messages = [{"role": "system", "content": system_prompt}] + conversation
     await backend.prefill(messages)
@@ -132,7 +128,6 @@ async def llm_prefill_user(
 async def llm_next_chunk(
     conversation: list[dict],
     system_prompt: str = SOUL,
-    model: str = DEFAULT_OLLAMA_MODEL,
     num_predict: int = LLM_CHUNK_TOKENS,
 ) -> tuple[str, bool]:
     """LEGACY: get the next ~5 words from the LLM. Returns (text, is_done).
@@ -141,7 +136,6 @@ async def llm_next_chunk(
     (pass assistant_so_far back in) duplicates output on models that don't
     cleanly continue assistant-role messages (e.g. glm-4.7-flash).
     """
-    del model
     messages = [{"role": "system", "content": system_prompt}] + conversation
     backend = get_backend()
     res = await backend.complete(messages, max_tokens=num_predict)
@@ -153,7 +147,6 @@ async def llm_next_chunk(
 async def llm_stream_chunks(
     conversation: list[dict],
     system_prompt: str = SOUL,
-    model: str = DEFAULT_OLLAMA_MODEL,
     max_words: int = 20,
     stats: dict | None = None,
 ):
@@ -190,7 +183,6 @@ async def llm_stream_chunks(
         "give me a sec.",
         "Give me a sec.",
     ]
-    del model  # backend owns the model id
     backend = get_backend()
     async for tok in backend.stream(
         messages, max_tokens=2048, stop=stop_seqs, stats=stats

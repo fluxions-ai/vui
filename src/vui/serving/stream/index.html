@@ -279,12 +279,12 @@ body.viz-only #viz-exit-btn { display: block; }
 </div>
 
 <div class="section">
-    <label>LLM Model</label>
+    <label>LLM Model <span id="llm-backend-label" style="opacity:.6;font-weight:normal;"></span></label>
     <div class="prompt-row">
-        <select id="ollama-model" title="Local LLM (via Ollama) that drives the conversation. Switching live re-prefills the soul."></select>
-        <button class="reset-btn" onclick="refreshOllamaModels()" style="padding:6px 8px;" title="Refresh the list of installed Ollama models">&#x21bb;</button>
-        <input type="text" id="ollama-pull-name" placeholder="Pull new model..." title="Name of an Ollama model to download (e.g. qwen3.5:4b). Click Pull to fetch.">
-        <button class="load-btn" onclick="pullOllamaModel()" title="Download the model named on the left from Ollama's registry">Pull</button>
+        <select id="ollama-model" title="LLM that drives the conversation. Switching live re-prefills the soul."></select>
+        <button class="reset-btn" onclick="refreshLlmModels()" style="padding:6px 8px;" title="Refresh the model list">&#x21bb;</button>
+        <input type="text" id="ollama-pull-name" placeholder="Pull new model..." title="Name of a model to download (e.g. qwen3.5:4b). Click Pull to fetch.">
+        <button class="load-btn" id="llm-pull-btn" onclick="pullLlmModel()" title="Download the model named on the left from the backend's registry">Pull</button>
     </div>
     <div id="pull-progress" style="font-size:0.8em;color:#60a5fa;margin-top:6px;min-height:1.2em;"></div>
 </div>
@@ -663,7 +663,7 @@ function onWsMessage(e) {
     } else if (data.type === 'ctx_status') {
         updateConvCtx(data);
     } else if (data.type === 'model_changed') {
-        refreshOllamaModels();
+        refreshLlmModels();
     } else if (data.type === 'log') {
         addLog(data.text, data.level || 'info');
     }
@@ -1013,9 +1013,9 @@ document.getElementById('asr-model').addEventListener('change', async () => {
 
 refreshAsrModels();
 
-async function refreshOllamaModels() {
+async function refreshLlmModels() {
     try {
-        const resp = await fetch('/ollama/models');
+        const resp = await fetch('/llm/models');
         const data = await resp.json();
         const sel = document.getElementById('ollama-model');
         sel.innerHTML = '';
@@ -1026,6 +1026,15 @@ async function refreshOllamaModels() {
             if (m === data.current) opt.selected = true;
             sel.appendChild(opt);
         });
+        // Backends differ in what they can do: vLLM serves one model per
+        // process and has no registry, so hide Pull rather than leaving a
+        // control that always errors.
+        sel.disabled = !data.can_switch;
+        const pullDisplay = data.can_pull ? '' : 'none';
+        document.getElementById('ollama-pull-name').style.display = pullDisplay;
+        document.getElementById('llm-pull-btn').style.display = pullDisplay;
+        const label = document.getElementById('llm-backend-label');
+        if (label) label.textContent = data.backend || '';
     } catch(e) {}
 }
 
@@ -1034,25 +1043,25 @@ document.getElementById('ollama-model').addEventListener('change', async () => {
     if (!model) return;
     setStatus('Switching model to ' + model + '...');
     try {
-        const resp = await fetch('/ollama/model', {
+        const resp = await fetch('/llm/model', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({model}),
         });
         const data = await resp.json();
         if (data.ok) { setStatus('Model: ' + data.model); }
-        else { setStatus('Model failed: ' + data.error); await refreshOllamaModels(); }
+        else { setStatus('Model failed: ' + data.error); await refreshLlmModels(); }
     } catch(e) { setStatus('Model switch error: ' + e.message); }
 });
 
-async function pullOllamaModel() {
+async function pullLlmModel() {
     const input = document.getElementById('ollama-pull-name');
     const model = input.value.trim();
     if (!model) return;
     const prog = document.getElementById('pull-progress');
     prog.textContent = 'Starting pull...';
     try {
-        const resp = await fetch('/ollama/pull', {
+        const resp = await fetch('/llm/pull', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({model}),
@@ -1061,14 +1070,14 @@ async function pullOllamaModel() {
         if (data.ok) {
             prog.textContent = 'Done!';
             input.value = '';
-            await refreshOllamaModels();
+            await refreshLlmModels();
         } else {
             prog.textContent = 'Failed: ' + data.error;
         }
     } catch(e) { prog.textContent = 'Error: ' + e.message; }
 }
 
-refreshOllamaModels();
+refreshLlmModels();
 
 document.getElementById('prompt-file').addEventListener('change', async (e) => {
     const file = e.target.files[0];

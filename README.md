@@ -56,7 +56,7 @@ Vui is a real-time voice assistant: speak into your mic, the model transcribes, 
 curl -fsSL https://install.fluxions.ai | bash
 ```
 
-Clones into `~/vui`, auto-detects Docker vs. native, installs deps (uv, Ollama, ffmpeg, Claude Code CLI), pulls the model, and launches the stack on <http://localhost:8080>. Flags (`--docker`, `--native`, `--no-claude`, `--upgrade`, `--model <name>`, `--dry-run`) forward to `install.sh` — see `./install.sh --help` from the clone for the full list.
+Clones into `~/vui`, auto-detects Docker vs. native, installs deps (uv, ffmpeg libs, Claude Code CLI), and launches the stack on <http://localhost:8080>. The native path needs no sudo. Flags (`--docker`, `--native`, `--llm <backend>`, `--no-claude`, `--upgrade`, `--model <name>`, `--dry-run`) forward to `install.sh` — see `./install.sh --help` from the clone for the full list.
 
 ## Quick start (docker-compose, recommended)
 
@@ -109,12 +109,14 @@ If you'd rather skip Docker. Both services run as plain Python processes; the ta
 
 ### Vui streaming server
 
-**System dependency: ffmpeg.** `torchcodec` dynamically links against the ffmpeg shared libraries at runtime and will fail to import without them. Docker users get this for free; native installers need it on the host:
+**System dependency: the ffmpeg shared libraries.** `torchcodec` links against `libavcodec`/`libavformat`/`libavutil` at runtime and won't import without them. Note it's the *libraries* — Vui never runs the `ffmpeg` binary, so the static-binary PyPI packages (`static-ffmpeg`, `imageio-ffmpeg`, `ffmpeg-binaries`) do **not** satisfy it. Docker users get this for free. Otherwise:
 
 ```sh
 sudo apt install ffmpeg                     # Debian / Ubuntu
 brew install ffmpeg                         # macOS
 ```
+
+No root? `./install.sh --native` fetches an LGPL shared build into `~/.cache/vui/ffmpeg` and preloads it — nothing goes on `LD_LIBRARY_PATH`. See [`docs/rootless-install.md`](docs/rootless-install.md), which also covers building ffmpeg from source.
 
 Then:
 
@@ -136,10 +138,9 @@ ollama pull qwen3.5:4b
 python -m vui.serving.stream    # http://localhost:8080
 ```
 
-Point at a different LLM backend via env vars — both must be set in the shell that runs `python -m vui.serving.stream` (they hit separate code paths: chat/streaming vs. model-list/pull helpers):
+Point at a different LLM backend via env vars in the shell that runs `python -m vui.serving.stream`:
 ```sh
-export VUI_OLLAMA_URL="http://gpu-box.lan:11434"   # chat/streaming path
-export OLLAMA_URL="http://gpu-box.lan:11434"       # model-list / pull / MLX detect
+export VUI_OLLAMA_URL="http://gpu-box.lan:11434"   # bare OLLAMA_URL also works
 export VUI_OLLAMA_MODEL="qwen3:8b"                 # initial model (UI can switch live)
 ```
 vLLM and other OpenAI-compatible backends are also supported (`VUI_LLM_BACKEND=vllm` + `VUI_VLLM_URL=…`); see [`docs/configuration.md`](docs/configuration.md#custom-model-server).
@@ -148,6 +149,30 @@ vLLM and other OpenAI-compatible backends are also supported (`VUI_LLM_BACKEND=v
 On first run the server auto-creates `qwen3.5-4b-mlx` via `ollama create --experimental --quantize int4` (~37 tok/s decode vs ~19 tok/s for GGUF Q4 on the same 4B model). Falls back to `qwen3.5:4b` GGUF if MLX setup fails. `--experimental` is required — without it Ollama converts to GGUF and you lose the speedup.
 
 > **Help wanted — Apple Silicon.** Vui runs on Mac but the MLX path (TTS worker, MLX-Moonshine ASR, the `qwen3.5-4b-mlx` Ollama variant) hasn't had the same polish as the CUDA path. If you're a Mac user who'd like to help shake out rough edges — kernel perf, streaming stability on M-series, the docker-compose story for Apple Silicon — we'd love contributors. Open an issue or PR on the repo, or get in touch via [fluxions.ai](https://fluxions.ai).
+
+### Running without root
+
+`./install.sh --native` needs no sudo and no Docker. Everything lands in `$HOME`: `~/.local/bin` (uv, Claude CLI), `~/.cache/vui/ffmpeg` (ffmpeg shared libs), `~/.cache/huggingface` (weights), `~/.vui` (TLS cert, memories, tasks). Every port is unprivileged (8080/8443/8642), GPU access needs no group membership — the CUDA userspace comes from pip wheels — and audio is WebRTC in the browser, so there's no `/dev/snd` to get access to.
+
+The one thing the installer will not do is install Ollama: its installer requires root, writes to `/usr/local`, and adds a systemd unit. So on the native path it either uses an Ollama you already run, or defaults to **vLLM**, which is pip-installable:
+
+```sh
+uv run --with 'vllm==0.26.0' python -m vllm.entrypoints.openai.api_server \
+    --model google/gemma-4-E4B-it --max-model-len 8192 \
+    --max-num-seqs 1 --enforce-eager --gpu-memory-utilization 0.6 \
+    --enable-auto-tool-choice --tool-call-parser gemma4 --port 8000
+```
+
+Those flags are sized for a single user sharing one GPU with the TTS and ASR workers, and none of them are optional:
+
+| Flag | Why |
+|---|---|
+| `--max-num-seqs 1` | One request's worth of KV cache. vLLM otherwise reserves slots for many concurrent sequences you'll never use. |
+| `--enforce-eager` | Skips CUDA graph capture — saves both VRAM and a chunk of startup time. |
+| `--gpu-memory-utilization 0.6` | vLLM defaults to **0.9 and pre-allocates**, which starves the TTS worker and OOMs it at startup. Size this to weights + one request's KV; 0.6 suits a ~9 GiB model on a 24 GiB card. |
+| `--enable-auto-tool-choice --tool-call-parser gemma4` | Both are required together, or vLLM returns **400 to every request carrying tools** — not just ones the model would answer with a call. The parser is model-specific: `gemma4` for gemma-4, `hermes` for Qwen3. |
+
+No LLM at all is fine: the server still binds, TTS and ASR work, and the `llm` pill turns green by itself once a backend appears. Details and the from-source ffmpeg build in [`docs/rootless-install.md`](docs/rootless-install.md).
 
 ### TTS demo on its own
 ```sh

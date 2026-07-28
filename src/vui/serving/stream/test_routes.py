@@ -134,27 +134,14 @@ async def _llm_reply(server, user_text: str) -> str:
     when the chunk loop passes assistant_so_far back in. For test-route
     benchmarking, fidelity > latency — so we just ask for the full reply.
     """
-    import httpx
-
-    from vui.serving.stream.server import OLLAMA_URL
+    from vui.serving.stream.llm_backend import get_backend
 
     conv = list(server.session.conversation) + [{"role": "user", "content": user_text}]
     messages = [{"role": "system", "content": server.session.soul}] + conv
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            f"{OLLAMA_URL}/api/chat",
-            json={
-                "model": server.ollama_model,
-                "messages": messages,
-                "stream": False,
-                "keep_alive": "30m",
-                "think": False,
-                "options": {"num_ctx": 8192, "num_predict": 512},
-            },
-        )
-        resp.raise_for_status()
-        text = resp.json().get("message", {}).get("content", "").strip()
-    return server._clean_llm_text(text)
+    # temperature=None -> the backend's configured default (which mirrors the
+    # qwen3.5:4b Modelfile), rather than complete()'s greedy 0.0.
+    res = await get_backend().complete(messages, max_tokens=512, temperature=None)
+    return server._clean_llm_text((res.get("content") or "").strip())
 
 
 async def _speak(server, text: str) -> dict:

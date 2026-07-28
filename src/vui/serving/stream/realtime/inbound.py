@@ -107,7 +107,7 @@ async def _load_voice(adapter: RealtimeAdapter, voice: str):
 
 async def _safe_prefill(srv, prompt: str):
     try:
-        await llm_prefill_system(prompt, srv.ollama_model)
+        await llm_prefill_system(prompt)
     except Exception as e:
         _slog(f"[realtime] system prompt prefill failed: {e}")
 

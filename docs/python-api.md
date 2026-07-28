@@ -9,6 +9,7 @@ CUDA-only. For the Apple-Silicon MLX path see [the bottom of this doc](#apple-si
 If your voice prompt is short (<15s), `Engine()` + a one-segment prefill is all you need:
 
 ```python
+import vui  # must precede torchcodec: preloads the ffmpeg libs it dlopens
 import torch
 from torchcodec.decoders import AudioDecoder
 from torchcodec.encoders import AudioEncoder
@@ -54,6 +55,7 @@ The right pattern is multi-segment prefill: split the prompt at sentence boundar
 `vui.prompt_utils.build_prompt_segments` does all of this for you. You give it audio + two callbacks (encoder, transcriber); it runs ASR on the full clip, force-aligns words to audio with Wav2Vec2, trims trailing partial sentences, splits at sentence terminators near the target segment length, and slices the pre-encoded codes by frame index — no re-encoding per segment.
 
 ```python
+import vui  # must precede torchcodec: preloads the ffmpeg libs it dlopens
 import torch
 from torchcodec.decoders import AudioDecoder
 

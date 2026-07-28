@@ -363,7 +363,6 @@ class ThoughtsStream:
             await llm_prefill_user(
                 self.srv.session.conversation,
                 self.srv.session.soul,
-                self.srv.ollama_model,
             )
             _slog(
                 f"[thoughts] conv KV prefilled for result delivery "

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import time
 from typing import TYPE_CHECKING
@@ -18,10 +17,10 @@ from vui.serving.stream._log import _slog, _spawn, _warn
 from vui.serving.stream.frontend import get_html
 from vui.serving.stream.llm import (
     GGUF_MODEL_NAME,
-    OLLAMA_URL,
     ensure_mlx_model,
     llm_prefill_system,
 )
+from vui.serving.stream.llm_backend import get_backend
 from vui.serving.stream.playback import TTSPlaybackTrack
 from vui.serving.stream.prompts import (
     SOUL,
@@ -499,11 +498,9 @@ async def handle_ws(srv: StreamServer, request):
 
                         async def _prefill_safe():
                             try:
-                                await llm_prefill_system(
-                                    srv.session.soul, srv.ollama_model
-                                )
+                                await llm_prefill_system(srv.session.soul)
                             except Exception as e:
-                                await srv._log(f"Ollama prefill failed: {e}", "warn")
+                                await srv._log(f"LLM prefill failed: {e}", "warn")
 
                         _spawn(_prefill_safe(), "ollama_prefill_after_soul")
 
@@ -530,9 +527,7 @@ async def handle_ws(srv: StreamServer, request):
 
                             async def _prefill_name_change():
                                 try:
-                                    await llm_prefill_system(
-                                        srv.session.soul, srv.ollama_model
-                                    )
+                                    await llm_prefill_system(srv.session.soul)
                                 except Exception as e:
                                     await srv._log(
                                         f"Prefill after name change failed: {e}",
@@ -607,13 +602,10 @@ async def _task_server_poll_loop(srv: StreamServer):
 
 
 async def probe_llm() -> bool:
-    from vui.serving.stream.llm_backend import get_backend
-
-    base_url = get_backend().base_url
+    # Backend-dispatched: /api/version is Ollama-only and 404s on vLLM, which
+    # used to leave the UI's llm pill red even though replies worked fine.
     try:
-        async with httpx.AsyncClient(timeout=3) as client:
-            r = await client.get(f"{base_url}/api/version")
-            return r.status_code == 200
+        return await get_backend().health()
     except Exception:
         return False
 
@@ -667,7 +659,9 @@ async def warmup(srv: StreamServer):
     # Warn if Ollama's OLLAMA_NUM_PARALLEL < 2. We have to ask the OS —
     # Ollama doesn't surface this via API/CLI, and reading our own
     # `os.environ` is meaningless since Ollama is a separate daemon.
-    if llm_up:
+    # Ollama-only by nature: this reads one specific daemon's OS-level env, and
+    # vLLM's continuous batching makes the concern moot anyway.
+    if llm_up and get_backend().name == "ollama":
         n_par = _probe_ollama_num_parallel()
         if n_par is not None and n_par < 2:
             _warn(
@@ -752,38 +746,30 @@ async def warmup(srv: StreamServer):
                     f"Auto-loaded prompt '{resp.get('name', last)}' (T={resp['T']})"
                 )
 
-    if _srv_mod.IS_APPLE_SILICON:
+    backend = get_backend()
+
+    # Gated on the backend: `ollama create --quantize int4` is a multi-GB
+    # download plus a several-minute quantize, and under vLLM it would build a
+    # model the request path never references.
+    if _srv_mod.IS_APPLE_SILICON and backend.name == "ollama":
         try:
             await asyncio.to_thread(ensure_mlx_model)
         except Exception as e:
             await srv._log(f"MLX model setup failed, falling back to GGUF: {e}", "warn")
-            srv.ollama_model = GGUF_MODEL_NAME
+            await backend.set_model(GGUF_MODEL_NAME)
 
-    explicit_model = os.environ.get("VUI_OLLAMA_MODEL")
-    if explicit_model:
-        srv.ollama_model = explicit_model
-        await srv._log(f"Using VUI_OLLAMA_MODEL={explicit_model}")
-    else:
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(f"{OLLAMA_URL}/api/ps")
-                loaded = [m["name"] for m in resp.json().get("models", []) if m.get("name")]
-                if loaded:
-                    srv.ollama_model = loaded[0]
-                    await srv._log(f"Using loaded Ollama model: {srv.ollama_model}")
-        except Exception:
-            pass
+    await srv._log(f"LLM: {backend.name} / {backend.model}")
 
     async def _prefill_system():
         try:
-            await llm_prefill_system(srv.session.soul, srv.ollama_model)
+            await llm_prefill_system(srv.session.soul)
         except Exception as e:
-            await srv._log(f"Ollama prefill failed: {e}", "warn")
+            await srv._log(f"LLM prefill failed: {e}", "warn")
 
     async def _prefill_thoughts():
         try:
             thoughts_prompt = srv._thoughts._build_system_prompt()
-            await llm_prefill_system(thoughts_prompt, srv.ollama_model)
+            await llm_prefill_system(thoughts_prompt)
             await srv._log("Thoughts stream KV warmed")
         except Exception as e:
             await srv._log(f"Thoughts prefill failed: {e}", "warn")
