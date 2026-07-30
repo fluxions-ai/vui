@@ -1037,7 +1037,7 @@ def main():
     else:
         print("[telemetry] disabled (VUI_TELEMETRY=0)", file=sys.stderr)
 
-    checkpoint_path = sys.argv[1] if len(sys.argv) > 1 else "vui-nano.safetensors"
+    checkpoint_path = sys.argv[1] if len(sys.argv) > 1 else "vui-190k.safetensors"
     from vui.hf import download
 
     checkpoint_path = download(checkpoint_path)

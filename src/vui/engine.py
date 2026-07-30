@@ -6,7 +6,7 @@ multi-conversation inference.
 
 Usage (streaming, B=1):
 
-    engine = Engine()  # loads "vui-nano" from HuggingFace by default
+    engine = Engine()  # loads "vui-190k" from HuggingFace by default
     with engine.new_row() as row:
         row.prefill([Segment(prompt_text, prompt_codes)], spk_emb=emb)
         for audio in row.stream("Hello!", GenConfig(temperature=0.9)):
@@ -282,18 +282,21 @@ class Engine:
     one per-row RQ decode (B=1 looped for correctness), vocoder CUDA graph
     for per-frame streaming decode.
 
-    `Engine()` with no args loads `vui-nano` from HuggingFace. Pass a name
+    `Engine()` with no args loads `vui-190k` from HuggingFace. Pass a name
     (resolved via `Engine.NAMES`), a HF filename, or a local path. Advanced
     callers can inject `model=` / `codec=` directly to bypass loading.
     """
 
     NAMES = {
         "vui-nano": "vui-nano.safetensors",
+        # 3x more stable with user codes in context than vui-nano
+        # (run 3hggswum, step 190000); adds the sq/wps conditioning knobs.
+        "vui-190k": "vui-190k.safetensors",
     }
 
     def __init__(
         self,
-        name: str = "vui-nano",
+        name: str = "vui-190k",
         *,
         model: Vui | None = None,
         codec: QwenCodecDecoder | None = None,

@@ -1099,7 +1099,9 @@ class Vui(nn.Module):
         self.eos_head = nn.Linear(cfg.d_model, 1)
         if cfg.sinusoidal_cond:
             self.sq_proj = (
-                ScalarCondProjector(6, cfg.d_model) if cfg.has_sq_proj else None
+                ScalarCondProjector(cfg.sq_input_dim, cfg.d_model)
+                if cfg.has_sq_proj
+                else None
             )
             self.wps_proj = (
                 ScalarCondProjector(1, cfg.d_model) if cfg.has_wps_proj else None
@@ -1107,7 +1109,7 @@ class Vui(nn.Module):
         else:
             self.sq_proj = None
             if cfg.has_sq_proj:
-                self.sq_proj = nn.Linear(6, cfg.d_model, bias=False)
+                self.sq_proj = nn.Linear(cfg.sq_input_dim, cfg.d_model, bias=False)
                 nn.init.normal_(self.sq_proj.weight, std=0.01)
             self.wps_proj = ScalarProjector(cfg.d_model) if cfg.has_wps_proj else None
         if cfg.has_spk_proj:
@@ -1185,7 +1187,7 @@ class Vui(nn.Module):
 
         from vui.config import infer_optional_modules
 
-        config = infer_optional_modules(config, state_dict.keys())
+        config = infer_optional_modules(config, state_dict)
         config = Config(**config)
 
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}

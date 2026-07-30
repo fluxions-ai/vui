@@ -52,6 +52,10 @@ class VuiConfig(BaseModel):
     has_sq_proj: bool = False
     has_wps_proj: bool = False
     has_spk_proj: bool = False
+    # Number of speech-quality metrics fed to the SQ projector. Varies by
+    # checkpoint (vui-nano=6, vui-190k=7), so the model builds
+    # ScalarCondProjector(sq_input_dim) rather than hard-coding a width.
+    sq_input_dim: int = 6
 
 
 class DataConfig(BaseModel):
@@ -85,17 +89,26 @@ _PROJ_FLAGS: tuple[tuple[str, str], ...] = (
 )
 
 
-def infer_optional_modules(config: dict, state_dict_keys) -> dict:
-    """Auto-detect `has_*_proj` flags from state-dict keys.
+def infer_optional_modules(config: dict, state_dict) -> dict:
+    """Auto-detect `has_*_proj` flags + `sq_input_dim` from the state dict.
 
     Older training scripts didn't persist these flags in the saved config
     but the weights are present — so build the model class with the
     matching modules whenever the corresponding sentinel keys exist.
     Any flag already set in the config wins.
+
+    Also recovers `sq_input_dim` from the SQ projector weight when the config
+    omits it: ScalarCondProjector packs `input_dim * n_freq(32) * 2` features,
+    so `input_dim = weight.shape[1] // 64`. Keeps pre-`sq_input_dim`
+    checkpoints (e.g. a raw vui-nano) loading strictly instead of silently
+    truncating a wider projector.
     """
-    keys = set(state_dict_keys)
+    keys = set(state_dict.keys()) if hasattr(state_dict, "keys") else set(state_dict)
     mcfg = config.setdefault("model", {})
     for flag, sentinel in _PROJ_FLAGS:
         if sentinel in keys and flag not in mcfg:
             mcfg[flag] = True
+    sq_w_key = "sq_proj.proj.0.weight"
+    if sq_w_key in keys and "sq_input_dim" not in mcfg and hasattr(state_dict, "keys"):
+        mcfg["sq_input_dim"] = state_dict[sq_w_key].shape[1] // (32 * 2)
     return config
