@@ -316,6 +316,7 @@ class Engine:
         self.codec = codec
         self.max_rows = max_rows
         self.vocoder_ctx = vocoder_ctx
+        self.probe_gate: dict | None = None  # set via load_probe_gate()
         self.device = model.device
         self.dtype = model.dtype
         self.Q = model.config.model.n_quantizers
@@ -577,6 +578,48 @@ class Engine:
             return cb0_logits
         factor = torch.pow(self._rep_penalty_t, self._rep_counts)
         return torch.where(cb0_logits > 0, cb0_logits / factor, cb0_logits * factor)
+
+    def load_probe_gate(
+        self,
+        path: str = "babble_probe-190k.pt",
+        *,
+        shadow: bool = False,
+        retries: int = 1,
+    ) -> dict:
+        """Enable the learned babble gate. A linear probe on the backbone
+        hidden scores p(babble) per frame; when the rolling mean over `window`
+        frames crosses `thr` at chunk start, the chunk is silently re-rolled at
+        a lower temperature (streaming holds the held frames un-decoded so no
+        babble reaches the codec). Offline A/B on vui-190k: babble 11.3% -> 2.9%.
+
+        `path` is a local file or an HF filename under `fluxions/vui`. The probe
+        is CHECKPOINT-SPECIFIC — it must match the running weights (the default
+        artifact is trained for vui-190k). `shadow=True` logs firings without
+        re-rolling. Set `engine.probe_gate = None` to disable.
+        """
+        from vui.hf import download
+
+        pd = torch.load(download(path), map_location="cpu", weights_only=False)
+        self.probe_gate = {
+            "w": pd["w"].to(self.device, torch.float32),
+            "b": float(pd["b"]),
+            "thr": float(pd["thr"]),
+            "window": int(pd["window"]),
+            "retries": int(retries),
+            "shadow": bool(shadow),
+            "fires": 0,
+        }
+        print(
+            f"[Engine] babble probe gate {'SHADOW (log-only)' if shadow else 'ON'}: "
+            f"{path} thr={self.probe_gate['thr']:.3f} "
+            f"window={self.probe_gate['window']}"
+        )
+        return self.probe_gate
+
+    @staticmethod
+    def _probe_score(gate: dict, hidden: Tensor) -> float:
+        """p(babble) for one backbone hidden (d,) via the linear probe."""
+        return (hidden.float().flatten() @ gate["w"] + gate["b"]).sigmoid().item()
 
     def _rep_push(self, codes: Tensor, penalty: float, window: int) -> None:
         """Push sampled cb0 codes (N,) into the rolling count tensors."""
@@ -914,6 +957,14 @@ class Engine:
         row_chunk_offset: dict[int, int] = {}
         row_retry_idx: dict[int, int] = {r.idx: 0 for r in rows}
 
+        # Optional babble probe gate: {"w": (d,) cuda f32, "b", "thr",
+        # "window", ...}. Per frame a linear probe on the backbone hidden
+        # scores p(babble); when the rolling mean over `window` frames crosses
+        # `thr`, the chunk is rewound and retried at lower temp (same path as
+        # the fpw guard). See Engine.load_probe_gate / bench/babble_probe_export.
+        gate = getattr(self, "probe_gate", None)
+        probe_hist: dict[int, list[float] | None] = {r.idx: [] for r in rows}
+
         def _advance_turn(row: Row, temp: float | None = None) -> Tensor | None:
             """Prefill the next chunk's text and sample the first frame.
             Returns (Q,) first_codes on GPU, or None if no more chunks."""
@@ -953,15 +1004,16 @@ class Engine:
             row_turn_count[row.idx] = 1
             return frame[0]
 
-        def _retry_chunk(row: Row) -> bool:
+        def _retry_chunk(row: Row, force: bool = False) -> bool:
             """Rewind KV and retry the current chunk at lower temperature.
-            Returns True if a retry was attempted, False if fpw is fine or
-            all retry temps exhausted."""
+            Returns True if a retry was attempted, False if fpw is fine (and
+            not forced) or all retry temps exhausted. force=True is the
+            probe-gate trigger — skips the fpw check, shares the retry budget."""
             ci = row_chunk_idx[row.idx]
             n_words = len(row_chunks[row.idx][ci]["text"].split())
             turn_n = row_turn_count[row.idx]
             fpw = turn_n / n_words if n_words > 0 else 999
-            if fpw >= _MIN_FPW:
+            if not force and fpw >= _MIN_FPW:
                 row_retry_idx[row.idx] = 0
                 return False
             ri = row_retry_idx[row.idx]
@@ -975,8 +1027,9 @@ class Engine:
             retry_temp = _RETRY_TEMPS[ri]
             row_retry_idx[row.idx] = ri + 1
             chunk_text_str = row_chunks[row.idx][ci]["text"]
+            reason = "probe" if force else f"fpw={fpw:.1f}"
             print(
-                f"[retry] row {row.idx} chunk {ci} fpw={fpw:.1f} -> retry {ri+1}/{len(_RETRY_TEMPS)} at temp={retry_temp}: {chunk_text_str[:60]}"
+                f"[retry] row {row.idx} chunk {ci} {reason} -> retry {ri+1}/{len(_RETRY_TEMPS)} at temp={retry_temp}: {chunk_text_str[:60]}"
             )
             saved = row_chunk_offset[row.idx]
             model.decoder.flash_kv_caches[0].seq_lens[row.idx : row.idx + 1] = saved
@@ -1031,6 +1084,10 @@ class Engine:
                 self._rep_push(code0s, cfg.rep_penalty, cfg.rep_window)
 
                 eos_cpu = torch.sigmoid(eos_all).float().cpu().numpy().flatten()
+                if gate is not None:
+                    probe_p = (
+                        (hidden_all.float() @ gate["w"] + gate["b"]).sigmoid().cpu()
+                    )
 
                 # One batched RQ call for all N rows — the batched-RQ bug in
                 # _generate_graph_body_kv was fixed (see model.py), so this is
@@ -1058,6 +1115,7 @@ class Engine:
                     )
                     if hit_eos:
                         if _retry_chunk(r):
+                            probe_hist[r.idx] = []
                             continue
                         row_retry_idx[r.idx] = 0
                         row_chunk_idx[r.idx] += 1
@@ -1065,6 +1123,24 @@ class Engine:
                         if nxt is None:
                             active[r.idx] = False
                         continue
+                    if gate is not None:
+                        h = probe_hist[r.idx]
+                        if turn_n <= 1:
+                            h = probe_hist[r.idx] = []  # new turn re-arms the gate
+                        if h is not None:
+                            h.append(float(probe_p[r.idx]))
+                            W = gate["window"]
+                            if len(h) >= W and sum(h[-W:]) / W > gate["thr"]:
+                                gate["fires"] = gate.get("fires", 0) + 1
+                                if gate.get("shadow"):
+                                    probe_hist[r.idx] = None  # log once per turn
+                                elif _retry_chunk(r, force=True):
+                                    probe_hist[r.idx] = []
+                                    continue
+                                else:
+                                    # Budget exhausted — disarm for this turn or
+                                    # the crossing re-fires every frame.
+                                    probe_hist[r.idx] = None
                     if frames_all is not None:
                         frame = frames_all[r.idx]
                     else:
@@ -1388,9 +1464,18 @@ class Engine:
                 # Gate only the first chunk (where rep state was just reset
                 # and hallucinations are most common). Mid-turn gating would
                 # need rep-state snapshot/restore — skipped for now.
-                use_gate = cfg.gate_frames > 0 and ci == 0 and reset_rep
+                # The learned probe gate (engine.probe_gate), when present,
+                # takes precedence over the entropy heuristic: hold the first
+                # `window` frames un-decoded, score each with the probe, and
+                # re-roll the chunk if the mean p(babble) crosses `thr`.
+                probe = getattr(self, "probe_gate", None)
+                use_gate = (
+                    (cfg.gate_frames > 0 or probe is not None)
+                    and ci == 0
+                    and reset_rep
+                )
                 chunk_start = row.offset
-                gate_target = cfg.gate_frames
+                gate_target = probe["window"] if probe is not None else cfg.gate_frames
 
                 n_words = len(chunk["text"].split())
                 max_per_turn = cfg.max_turn_frames(n_words, row.prompt_wps)
@@ -1420,10 +1505,14 @@ class Engine:
                     held: list[Tensor] = []
                     entropies: list[float] = []
                     top1s: list[float] = []
+                    probe_scores: list[float] = []
                     if use_gate:
-                        e, p1 = _entropy_top1(probs)
-                        entropies.append(e)
-                        top1s.append(p1)
+                        if probe is not None:
+                            probe_scores.append(self._probe_score(probe, hidden))
+                        else:
+                            e, p1 = _entropy_top1(probs)
+                            entropies.append(e)
+                            top1s.append(p1)
                     code0 = torch.multinomial(probs, 1).squeeze(-1)
                     self._rep_push(code0, cfg.rep_penalty, cfg.rep_window)
                     frame = rq.generate_cuda_graph_kv(
@@ -1458,9 +1547,14 @@ class Engine:
                         # temp (cfg.temperature is frozen).
                         probs_s = F.softmax(cb0_pen.float() / cur_temp, dim=-1)
                         if gathering:
-                            e, p1 = _entropy_top1(probs_s)
-                            entropies.append(e)
-                            top1s.append(p1)
+                            if probe is not None:
+                                probe_scores.append(
+                                    self._probe_score(probe, hidden_all[0])
+                                )
+                            else:
+                                e, p1 = _entropy_top1(probs_s)
+                                entropies.append(e)
+                                top1s.append(p1)
                         if cfg.top_k is not None and cfg.top_k > 0:
                             topv, topi = probs_s.topk(cfg.top_k, dim=-1)
                             mask = torch.zeros_like(probs_s).scatter_(1, topi, topv)
@@ -1489,7 +1583,37 @@ class Engine:
 
                         if gathering:
                             held.append(frame[0])
-                            if len(held) == gate_target:
+                            if len(held) == gate_target and probe is not None:
+                                avg_p = sum(probe_scores) / len(probe_scores)
+                                fire = avg_p > probe["thr"]
+                                if fire:
+                                    probe["fires"] = probe.get("fires", 0) + 1
+                                retries = probe.get("retries", 1)
+                                if (
+                                    fire
+                                    and not probe.get("shadow")
+                                    and retry_idx < retries
+                                ):
+                                    print(
+                                        f"[probe-gate] p={avg_p:.3f} > thr="
+                                        f"{probe['thr']:.3f} -> retry {retry_idx + 1}"
+                                        f"/{retries}"
+                                    )
+                                    retry_triggered = True
+                                    break
+                                print(
+                                    f"[probe-gate] p={avg_p:.3f} "
+                                    f"{'FIRE(shadow)' if fire else 'pass'} "
+                                    f"({len(held)}f, retry={retry_idx})"
+                                )
+                                for hc in held:
+                                    yield self._stream_decode_frame(
+                                        hc, cfg.n_codebooks
+                                    )
+                                    total_frames += 1
+                                held = []
+                                use_gate = False
+                            elif len(held) == gate_target:
                                 avg_e = sum(entropies) / len(entropies)
                                 avg_p1 = sum(top1s) / len(top1s)
                                 if (

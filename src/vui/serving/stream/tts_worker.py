@@ -246,7 +246,37 @@ class TTSEngine:
         for text in ["Hello warmup.", "Testing one two three."]:
             self.row.render(text, cfg)
             self.row.reset()
+
+        self._maybe_load_probe_gate()
         print("[TTS] Ready!")
+
+    def _maybe_load_probe_gate(self):
+        """Enable the learned babble gate on the engine. On by default for the
+        vui-190k checkpoint the probe was trained on. Env overrides:
+          VUI_PROBE_GATE=0            disable
+          VUI_PROBE_GATE=<path>       use a custom probe artifact
+          VUI_PROBE_GATE_MODE=shadow  log firings without re-rolling
+          VUI_PROBE_GATE_RETRIES=N    re-roll budget per chunk (default 1)
+        The default artifact matches vui-190k only — on other checkpoints the
+        gate stays off unless an explicit path is given.
+        """
+        setting = os.environ.get("VUI_PROBE_GATE", "")
+        if setting == "0":
+            return
+        ckpt = str(getattr(self, "checkpoint_path", ""))
+        is_190k = "190k" in ckpt or "0190000" in ckpt or "3hggswum" in ckpt
+        if setting and setting != "1":
+            path = setting  # explicit artifact path
+        elif is_190k:
+            path = "babble_probe-190k.pt"
+        else:
+            return  # unknown checkpoint, no matching probe — leave gate off
+        shadow = os.environ.get("VUI_PROBE_GATE_MODE", "") == "shadow"
+        retries = int(os.environ.get("VUI_PROBE_GATE_RETRIES", "1"))
+        try:
+            self.engine.load_probe_gate(path, shadow=shadow, retries=retries)
+        except Exception as e:
+            print(f"[TTS] probe gate load failed ({path}): {e} — no gate")
 
     # --- KV + conditioning ---
 
