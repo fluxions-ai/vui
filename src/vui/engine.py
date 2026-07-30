@@ -23,6 +23,7 @@ Usage (batched, B=N):
 
 from __future__ import annotations
 
+import os
 from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -305,8 +306,10 @@ class Engine:
         codec_dtype: torch.dtype = torch.float32,
         vocoder_ctx: int = 25,
     ):
+        self._loaded_ckpt = None
         if model is None:
             path = self.NAMES.get(name, name)
+            self._loaded_ckpt = path
             print(f"[Engine] Loading model {path} ...")
             model = Vui.from_pretrained_inf(path).cuda()
         if codec is None:
@@ -348,6 +351,24 @@ class Engine:
 
         self._free: set[int] = set(range(max_rows))
         self._rows: dict[int, Row] = {}
+
+        # Babble gate on by default when we loaded the checkpoint its probe was
+        # trained on (vui-190k). Best-effort: a missing artifact / offline box
+        # just leaves the gate off. VUI_PROBE_GATE=0 opts out;
+        # VUI_PROBE_GATE_MODE=shadow logs firings without re-rolling. The
+        # streaming server injects model= (so this skips) and arms the gate
+        # itself in tts_worker.
+        if (
+            self._loaded_ckpt
+            and "190k" in str(self._loaded_ckpt)
+            and os.environ.get("VUI_PROBE_GATE") != "0"
+        ):
+            try:
+                self.load_probe_gate(
+                    shadow=os.environ.get("VUI_PROBE_GATE_MODE", "") == "shadow"
+                )
+            except Exception as e:
+                print(f"[Engine] babble gate auto-load skipped: {e}")
 
     # ------------------------------------------------------------------
     # Construction
