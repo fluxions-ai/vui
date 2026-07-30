@@ -56,7 +56,7 @@ RENDER_MODE = _args.render
 if RENDER_MODE and __name__ == "__main__":
     from vui.demo.cli import run as cli_run
 
-    checkpoint_path = _args.checkpoint or "vui-nano.safetensors"
+    checkpoint_path = _args.checkpoint or "vui-190k.safetensors"
     render_text = " ".join(_args.text) if _args.text else None
     overrides = {}
     if _args.temperature is not None:
@@ -317,7 +317,7 @@ def _save_settings(**kwargs):
 S = _load_settings()
 
 
-checkpoint_path = _args.checkpoint or "vui-nano.safetensors"
+checkpoint_path = _args.checkpoint or "vui-190k.safetensors"
 
 from vui.hf import download
 

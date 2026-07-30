@@ -1218,13 +1218,20 @@ class TTSEngine:
             chunk_text = text
 
         if not final:
+            # Incremental chunks write CODES ONLY — the turn's text lands in
+            # one piece at the final commit, so KV holds `codes...codes text
+            # [SC]` (training's single audio-then-text pair). Interleaving
+            # per-chunk `codes text` pairs measured 16%->4% babble
+            # (bench/eval_user_punct.py chunked_codes_only). Not appending to
+            # _user_text_prefilled makes the final's dedupe yield the full
+            # transcript.
             end_frame = min(int(stable_end_time * CODEC_HZ), total_frames)
             start_frame = self._user_codes_consumed
 
-            if not chunk_text or end_frame <= start_frame:
+            if end_frame <= start_frame:
                 _logf(
-                    f"[TTS.chunk] skip: chunk_text='{chunk_text[:30]}' "
-                    f"frames={start_frame}->{end_frame}/{total_frames}"
+                    f"[TTS.chunk] skip: no new frames "
+                    f"({start_frame}->{end_frame}/{total_frames})"
                 )
                 return 0
 
@@ -1236,16 +1243,15 @@ class TTSEngine:
 
             chunk_codes = all_codes[start_frame:end_frame]
             self._user_codes_consumed = end_frame
-            self._user_text_prefilled.append(chunk_text)
-            self.row.add_user(text=chunk_text, codes=chunk_codes, final=False)
+            self.row.add_user(text="", codes=chunk_codes, final=False)
 
             n = chunk_codes.shape[0]
             spk = (
                 "[user_spk] " if (is_first and self._user_spk_token is not None) else ""
             )
-            self._seq_add(f'{spk}[user] "{chunk_text}" [{n}f]')
+            self._seq_add(f"{spk}[user] [{n}f]")
             _logf(
-                f"[TTS.chunk] KV written: '{chunk_text[:50]}' "
+                f"[TTS.chunk] KV codes written: "
                 f"frames={start_frame}->{end_frame} ({n}f) T={self.row.offset}"
             )
             return n
