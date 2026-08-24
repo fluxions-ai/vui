@@ -45,7 +45,7 @@ Vui is a real-time voice assistant: speak into your mic, the model transcribes, 
 - **Built-in web search** — single-query factual lookups ("weather in London", "price of X", "who won the match") via Serper, Brave, or Tavily — one API round-trip, no agent loop; falls through to `delegate` for multi-step research
 - **Optional Claude task server** — sidecar agent that handles slow/agentic work (Gmail, Calendar, Drive, Slack, multi-step web research) via your existing Claude Code MCPs; auto-discovered on boot
 - **Non-Anthropic task backends** — point the task server at Ollama, z.ai, DeepSeek, vLLM, LM Studio, LiteLLM via the Anthropic-compatible `/v1/messages` envelope
-- **Apple Silicon support** — MLX backend (WIP)
+- **Apple Silicon support** — MLX TTS inference works (quantized vui-190k, pre-baked weights auto-download, ~1.5× real-time on M4); the rest of the MLX stack is WIP
 - **Mobile-ready** — documented cloudflared and Tailscale paths for phone access with mic over HTTPS
 - **Docker compose** — one file brings up the full stack (streaming server + optional bundled Ollama + optional Claude task server)
 - **OpenClaw integration** — point OpenClaw's `openai` realtime provider at Vui for a fully-local voice front-end
@@ -147,7 +147,7 @@ vLLM and other OpenAI-compatible backends are also supported (`VUI_LLM_BACKEND=v
 **Apple Silicon — MLX auto-setup (~1.9× faster decode, recommended):**
 On first run the server auto-creates `qwen3.5-4b-mlx` via `ollama create --experimental --quantize int4` (~37 tok/s decode vs ~19 tok/s for GGUF Q4 on the same 4B model). Falls back to `qwen3.5:4b` GGUF if MLX setup fails. `--experimental` is required — without it Ollama converts to GGUF and you lose the speedup.
 
-> **Help wanted — Apple Silicon.** Vui runs on Mac but the MLX path (TTS worker, MLX-Moonshine ASR, the `qwen3.5-4b-mlx` Ollama variant) hasn't had the same polish as the CUDA path. If you're a Mac user who'd like to help shake out rough edges — kernel perf, streaming stability on M-series, the docker-compose story for Apple Silicon — we'd love contributors. Open an issue or PR on the repo, or get in touch via [fluxions.ai](https://fluxions.ai).
+> **Apple Silicon status.** TTS inference on MLX **works**: `vui.mlx.tts.*` renders voice-prompted speech end-to-end (int8 vui-190k, ~1.5× real-time on M4), and the pre-baked quantized weights auto-download on first run — no torch conversion step. The **rest of the MLX stack is WIP**: MLX-Moonshine ASR, streaming-server glue, the `qwen3.5-4b-mlx` Ollama variant, and the docker-compose story haven't had the same polish as the CUDA path. If you're a Mac user who'd like to help shake out rough edges — kernel perf, streaming stability on M-series — we'd love contributors. Open an issue or PR on the repo, or get in touch via [fluxions.ai](https://fluxions.ai).
 
 ### TTS demo on its own
 ```sh
