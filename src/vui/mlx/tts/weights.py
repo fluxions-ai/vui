@@ -10,6 +10,47 @@ from vui.mlx.tts.model import VuiMLX
 
 MLX_CACHE_DIR = os.path.expanduser("~/.cache/vui/mlx_weights")
 
+# Pre-baked MLX weights (quantized TTS + codec), published from the vui-ios
+# asset pipeline. Same files the iOS/macOS app ships — downloading them skips
+# the torch float32 load + quantize cold path entirely.
+PUBLIC_WEIGHTS_BASE = "https://public.fluxions.ai/"
+
+
+def fetch_public(filename: str) -> str | None:
+    """Download a pre-baked weight file into MLX_CACHE_DIR. Returns the local
+    path, or None if the file isn't published (fall back to conversion)."""
+    local = os.path.join(MLX_CACHE_DIR, filename)
+    if os.path.exists(local):
+        return local
+    import urllib.error
+    import urllib.request
+
+    url = PUBLIC_WEIGHTS_BASE + filename
+    os.makedirs(MLX_CACHE_DIR, exist_ok=True)
+    tmp = local + ".part"
+    # Cloudflare blocks the default Python-urllib user-agent with a 403.
+    req = urllib.request.Request(url, headers={"User-Agent": "vui/1.0"})
+    try:
+        print(f"Downloading {url}")
+        with urllib.request.urlopen(req) as r, open(tmp, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            done = 0
+            while chunk := r.read(1 << 22):
+                f.write(chunk)
+                done += len(chunk)
+                if total:
+                    print(f"\r  {done / 1e6:.0f}/{total / 1e6:.0f} MB", end="")
+        print()
+        os.replace(tmp, local)
+        return local
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
 
 def _apply_quant(model: VuiMLX, bits: int, group_size: int = 32):
     """Quantize attn + mlp in both decoder and rq_transformer, in place."""
@@ -37,6 +78,11 @@ def load_quantized(
     if bits == 0:
         # No quantization — regular float32 path.
         return load_model(checkpoint_path)
+
+    if not (os.path.exists(q_path) and os.path.exists(cfg_path)):
+        # Try the pre-baked public weights (published from vui-ios) first.
+        if fetch_public(os.path.basename(q_path)):
+            fetch_public(os.path.basename(cfg_path))
 
     if os.path.exists(q_path) and os.path.exists(cfg_path):
         with open(cfg_path) as f:
@@ -108,6 +154,23 @@ def load_from_pytorch(checkpoint_path: str) -> tuple[VuiMLX, dict]:
         k.replace("module.", "").replace("text_embedding.", "token_emb."): v
         for k, v in raw_state.items()
     }
+
+    # Infer sq_input_dim from weight shape (default 6, but some checkpoints use 7)
+    sq_w_key = "sq_proj.proj.0.weight"
+    if sq_w_key in pt_state:
+        n_freq = 32
+        sq_input_dim = pt_state[sq_w_key].shape[1] // (n_freq * 2)
+        config.setdefault("model", {})["sq_input_dim"] = sq_input_dim
+
+    # Saved configs can predate prob_sq/prob_wps (the PyTorch loader shims them
+    # on when the checkpoint carries the tensors); mirror that here so VuiMLX
+    # instantiates the projectors instead of dropping the weights.
+    if sq_w_key in pt_state and not config.get("data", {}).get("prob_sq"):
+        config.setdefault("data", {})["prob_sq"] = 1.0
+    if "wps_proj.proj.0.weight" in pt_state and not config.get("data", {}).get(
+        "prob_wps"
+    ):
+        config.setdefault("data", {})["prob_wps"] = 1.0
 
     model = VuiMLX(config)
     _load_weights(model, pt_state)

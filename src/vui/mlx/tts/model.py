@@ -410,7 +410,7 @@ class VuiMLX(nn.Module):
         )
 
         self.sq_proj = (
-            ScalarCondProjector(6, cfg["d_model"])
+            ScalarCondProjector(cfg.get("sq_input_dim", 6), cfg["d_model"])
             if data.get("prob_sq", 0) > 0 and cfg.get("sinusoidal_cond", False)
             else None
         )

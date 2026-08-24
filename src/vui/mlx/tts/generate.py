@@ -73,6 +73,9 @@ def compute_cond_bias(
 ) -> mx.array:
     bias = mx.zeros((1, 1, model.d_model))
     if sq is not None and model.sq_proj is not None:
+        # Match sq list length to model's expected input_dim
+        expected_dim = model.sq_proj.proj0.weight.shape[1] // 64  # n_freq=32, *2
+        sq = list(sq)[:expected_dim] + [0.0] * max(0, expected_dim - len(sq))
         bias = bias + model.sq_proj(mx.array([sq])).reshape(1, 1, -1)
     if wps > 0 and model.wps_proj is not None:
         bias = bias + model.wps_proj(mx.array([[wps]])).reshape(1, 1, -1)

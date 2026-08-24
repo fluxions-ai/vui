@@ -534,6 +534,10 @@ _MLX_CACHE = os.path.expanduser("~/.cache/vui/mlx_weights/codec_decoder.safetens
 
 def load_codec_decoder_mlx() -> QwenCodecDecoderMLX:
     """Load codec decoder. Uses cached MLX safetensors if available."""
+    if not os.path.exists(_MLX_CACHE):
+        from vui.mlx.tts.weights import fetch_public
+
+        fetch_public(os.path.basename(_MLX_CACHE))
     if os.path.exists(_MLX_CACHE):
         model = QwenCodecDecoderMLX()
         model.load_weights(_MLX_CACHE)
