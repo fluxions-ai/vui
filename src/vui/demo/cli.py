@@ -22,6 +22,8 @@ def run(
 ):
     if text is None:
         raise SystemExit("--render requires text: python demo.py --render [ckpt] \"text\"")
+    if not torch.cuda.is_available():
+        return run_mlx(checkpoint_path, prompt_file, text, **overrides)
     from vui.model import Vui
 
     torch.set_float32_matmul_precision("high")
@@ -121,3 +123,63 @@ def run(
             print("  Generation failed")
 
     state.teardown()
+
+
+def run_mlx(
+    checkpoint_path: str,
+    prompt_file: str = "prompts/harry.wav",
+    text: str | None = None,
+    **overrides,
+):
+    """MLX one-shot render (Apple Silicon / no CUDA). Reuses MLXTTSEngine."""
+    import queue
+    import threading
+
+    from vui.serving.stream.tts_worker_mlx import MLXTTSEngine
+
+    engine = MLXTTSEngine.from_checkpoint(checkpoint_path)
+
+    settings = {
+        "temperature": 0.9,
+        "max_duration": overrides.get("max_secs", 30.0),
+        "n_codebooks": overrides.get("n_codebooks", 0),
+    }
+    if "temperature" in overrides:
+        settings["temperature"] = overrides["temperature"]
+
+    prompt_path = Path(prompt_file)
+    if prompt_path.exists():
+        engine._load_prompt_by_name(prompt_path.stem, settings)
+
+    out_dir = Path("outputs")
+    out_dir.mkdir(exist_ok=True)
+
+    audio_queue: queue.Queue = queue.Queue()
+    t0 = time.perf_counter()
+    engine.generate(
+        simple_clean(text), settings, threading.Event(), audio_queue=audio_queue
+    )
+    dt = time.perf_counter() - t0
+
+    audio_chunks = []
+    while not audio_queue.empty():
+        msg = audio_queue.get_nowait()
+        if msg.get("type") == "audio":
+            audio_chunks.append(msg["data"])
+
+    if not audio_chunks:
+        print("  Generation failed")
+        return
+
+    full_audio = torch.cat(audio_chunks, dim=-1)
+    dur = full_audio.shape[-1] / QWEN_SR
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_file = str(out_dir / f"render_{ts}.wav")
+    encoded = AudioEncoder(
+        full_audio.squeeze().cpu().float().unsqueeze(0), sample_rate=int(QWEN_SR)
+    )
+    encoded.to_file(save_file)
+    print(f"  {dur:.1f}s in {dt:.2f}s ({dur/dt:.1f}x RTF) -> {save_file}")
+    subprocess.Popen(
+        ["play", save_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )

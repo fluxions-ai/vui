@@ -128,7 +128,7 @@ def load_model(
 
 
 def torch_to_mlx(t) -> mx.array:
-    return mx.array(t.float().numpy())
+    return mx.array(t.detach().float().numpy())
 
 
 def load_from_pytorch(checkpoint_path: str) -> tuple[VuiMLX, dict]:
@@ -154,6 +154,9 @@ def load_from_pytorch(checkpoint_path: str) -> tuple[VuiMLX, dict]:
         k.replace("module.", "").replace("text_embedding.", "token_emb."): v
         for k, v in raw_state.items()
     }
+    from vui.model import reject_legacy_checkpoint
+
+    reject_legacy_checkpoint(pt_state, source=checkpoint_path)
 
     # Infer sq_input_dim from weight shape (default 6, but some checkpoints use 7)
     sq_w_key = "sq_proj.proj.0.weight"

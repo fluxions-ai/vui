@@ -306,6 +306,13 @@ class Engine:
         codec_dtype: torch.dtype = torch.float32,
         vocoder_ctx: int = 25,
     ):
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "Engine requires CUDA — it captures CUDA graphs for decode. "
+                "On Apple Silicon use the MLX path instead: `python demo.py` "
+                "(auto-routes to MLX) or vui.mlx.tts; see 'Apple Silicon "
+                "status' in the README."
+            )
         self._loaded_ckpt = None
         if model is None:
             path = self.NAMES.get(name, name)
