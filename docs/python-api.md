@@ -221,6 +221,8 @@ The `ctx=6` parameter prepends 6 frames (~500ms) of codec context to smooth chun
 
 ## Apple Silicon (MLX)
 
+**Status:** TTS inference on MLX is working — quantized vui-190k renders voice-prompted speech end-to-end at ~1.5× real-time on M4, and `load_quantized` auto-downloads the pre-baked int8/int4 weights (no torch float32-load-and-quantize step; torch is still used to encode prompt audio). The wider MLX stack (ASR, streaming-server integration) is still WIP.
+
 The MLX path is a separate code surface (`vui.mlx.tts.*`) — same model, different runtime. The end-to-end equivalent of the chunked-prompt flow above is `demo.py:generate_chunked_mlx` (lines ~167–275). Key differences:
 
 - Loaded via `vui.mlx.tts.weights.load_quantized(ckpt_path, "float32"|"int8"|"int4")`.
