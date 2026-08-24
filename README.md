@@ -287,9 +287,11 @@ For best results: voice-prompt transcript must match the audio word-for-word, ai
 If you need a checkpoint tuned to a specific voice for a legitimate use case (audiobooks, accessibility, game characters, dubbing of consenting performers, internal tooling), **get in touch** via [fluxions.ai](https://fluxions.ai) — we can train, license, or host one for you.
 
 ```python
+# Requires an NVIDIA GPU — Engine is built on CUDA graphs. On Apple Silicon
+# use `python demo.py` (auto-routes to MLX) or vui.mlx.tts instead.
 from vui.engine import Engine, GenConfig
 
-engine = Engine()  # loads "vui-nano" from HuggingFace by default
+engine = Engine()  # loads "vui-190k.safetensors" from HuggingFace by default
 with engine.new_row() as row:
     codes, audio = row.render(
         "So [breath] the thing about this is, it's not what you'd expect, right?",

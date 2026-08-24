@@ -12,6 +12,23 @@ from vui.rope import apply_rotary_emb, precompute_freqs_cis
 from vui.tokenizer import VuiTokenizer
 
 
+# Key layout of the original-release checkpoints (vui-cohost-100m.pt etc.),
+# which predate the rq_transformer architecture. They bind to nothing in the
+# current model and must be rejected loudly rather than half-loaded.
+LEGACY_CHECKPOINT_KEYS = ("audio_embeddings.0.weight", "audio_heads.0.weight")
+
+
+def reject_legacy_checkpoint(state_dict: dict, source: str = "checkpoint"):
+    if any(k in state_dict for k in LEGACY_CHECKPOINT_KEYS):
+        raise ValueError(
+            f"{source} is a legacy checkpoint from the original vui release "
+            "(per-quantizer audio_embeddings/audio_heads, no rq_transformer) "
+            "and does not match the current architecture. Use "
+            "'vui-190k.safetensors' (default) or 'vui-nano.safetensors' from "
+            "https://huggingface.co/fluxions/vui instead."
+        )
+
+
 def load_what_you_can(checkpoint: dict, model: nn.Module):
     """Load as many weights from `checkpoint` as possible.
 
@@ -1191,6 +1208,10 @@ class Vui(nn.Module):
         config = Config(**config)
 
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        reject_legacy_checkpoint(
+            state_dict,
+            source=checkpoint_path if isinstance(checkpoint_path, str) else "checkpoint",
+        )
         state_dict = {
             k.replace("text_embedding.", "token_emb."): v for k, v in state_dict.items()
         }
