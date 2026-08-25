@@ -185,8 +185,8 @@ Selected from the UI dropdown (live-switchable). Backed by `ASR_MODELS` in `src/
 | `fwhisper.medium.en` | faster-whisper | GPU | English-only. |
 | `fwhisper.distil-large-v3` | faster-whisper | GPU | Multilingual, best quality. |
 | `fwhisper.turbo` | faster-whisper | GPU | Multilingual, ~similar accuracy to large-v3, faster. |
-| `mlx-whisper.small` | mlx-whisper | Apple Silicon | Requires `uv sync --extra mlx`. |
-| `mlx-whisper.turbo` | mlx-whisper | Apple Silicon | Requires `uv sync --extra mlx`. |
+| `mlx-whisper.small` | mlx-whisper | Apple Silicon | Installed automatically on Apple Silicon. |
+| `mlx-whisper.turbo` | mlx-whisper | Apple Silicon | Installed automatically on Apple Silicon. |
 
 Default at startup is set in code by `DEFAULT_ASR_MODEL = "fwhisper.distil-small.en"`. The UI remembers the last selection in `localStorage` and switches to it on reconnect.
 
