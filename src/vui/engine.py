@@ -295,6 +295,22 @@ class Engine:
         "vui-190k": "vui-190k.safetensors",
     }
 
+    def __new__(cls, *args, **kwargs):
+        if cls is Engine and not torch.cuda.is_available():
+            try:
+                from vui.mlx.engine import MLXEngine
+            except ImportError as e:
+                raise RuntimeError(
+                    "Engine requires CUDA — it captures CUDA graphs for "
+                    "decode — and the MLX fallback is unavailable "
+                    f"({e}). On Apple Silicon install the mlx extra "
+                    "(`uv sync --extra mlx`); other platforms need an "
+                    "NVIDIA GPU."
+                ) from e
+            print("[Engine] No CUDA — using MLX backend (single row)")
+            return MLXEngine(*args, **kwargs)
+        return super().__new__(cls)
+
     def __init__(
         self,
         name: str = "vui-190k",
@@ -306,13 +322,6 @@ class Engine:
         codec_dtype: torch.dtype = torch.float32,
         vocoder_ctx: int = 25,
     ):
-        if not torch.cuda.is_available():
-            raise RuntimeError(
-                "Engine requires CUDA — it captures CUDA graphs for decode. "
-                "On Apple Silicon use the MLX path instead: `python demo.py` "
-                "(auto-routes to MLX) or vui.mlx.tts; see 'Apple Silicon "
-                "status' in the README."
-            )
         self._loaded_ckpt = None
         if model is None:
             path = self.NAMES.get(name, name)

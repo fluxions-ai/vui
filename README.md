@@ -45,7 +45,7 @@ Vui is a real-time voice assistant: speak into your mic, the model transcribes, 
 - **Built-in web search** — single-query factual lookups ("weather in London", "price of X", "who won the match") via Serper, Brave, or Tavily — one API round-trip, no agent loop; falls through to `delegate` for multi-step research
 - **Optional Claude task server** — sidecar agent that handles slow/agentic work (Gmail, Calendar, Drive, Slack, multi-step web research) via your existing Claude Code MCPs; auto-discovered on boot
 - **Non-Anthropic task backends** — point the task server at Ollama, z.ai, DeepSeek, vLLM, LM Studio, LiteLLM via the Anthropic-compatible `/v1/messages` envelope
-- **Apple Silicon support** — MLX TTS inference works (quantized vui-190k, pre-baked weights auto-download, ~1.5× real-time on M4); the rest of the MLX stack is WIP
+- **Apple Silicon support** — the `Engine` Python API auto-dispatches to an MLX backend (quantized vui-190k, pre-baked weights auto-download, ~1.5–2.7× real-time on M4), `demo.py` and `demo.py --render` work end-to-end; the streaming-server MLX glue is WIP
 - **Mobile-ready** — documented cloudflared and Tailscale paths for phone access with mic over HTTPS
 - **Docker compose** — one file brings up the full stack (streaming server + optional bundled Ollama + optional Claude task server)
 - **OpenClaw integration** — point OpenClaw's `openai` realtime provider at Vui for a fully-local voice front-end
@@ -147,7 +147,7 @@ vLLM and other OpenAI-compatible backends are also supported (`VUI_LLM_BACKEND=v
 **Apple Silicon — MLX auto-setup (~1.9× faster decode, recommended):**
 On first run the server auto-creates `qwen3.5-4b-mlx` via `ollama create --experimental --quantize int4` (~37 tok/s decode vs ~19 tok/s for GGUF Q4 on the same 4B model). Falls back to `qwen3.5:4b` GGUF if MLX setup fails. `--experimental` is required — without it Ollama converts to GGUF and you lose the speedup.
 
-> **Apple Silicon status.** TTS inference on MLX **works**: `vui.mlx.tts.*` renders voice-prompted speech end-to-end (int8 vui-190k, ~1.5× real-time on M4), and the pre-baked quantized weights auto-download on first run — no torch conversion step. The **rest of the MLX stack is WIP**: MLX-Moonshine ASR, streaming-server glue, the `qwen3.5-4b-mlx` Ollama variant, and the docker-compose story haven't had the same polish as the CUDA path. If you're a Mac user who'd like to help shake out rough edges — kernel perf, streaming stability on M-series — we'd love contributors. Open an issue or PR on the repo, or get in touch via [fluxions.ai](https://fluxions.ai).
+> **Apple Silicon status.** TTS on MLX **works**: `Engine()` auto-dispatches to a single-row MLX backend with the same Row API (prefill / render / stream / rewind), `python demo.py` and `demo.py --render` run end-to-end (int8 vui-190k, ~1.5–2.7× real-time on M4), and the pre-baked quantized weights auto-download on first run — no torch conversion step. Even the [pre-1.0 legacy checkpoints](docs/legacy.md) run with an MLX decoder. The **rest of the MLX stack is WIP**: MLX-Moonshine ASR, streaming-server glue, the `qwen3.5-4b-mlx` Ollama variant, and the docker-compose story haven't had the same polish as the CUDA path. If you're a Mac user who'd like to help shake out rough edges — kernel perf, streaming stability on M-series — we'd love contributors. Open an issue or PR on the repo, or get in touch via [fluxions.ai](https://fluxions.ai).
 
 ### TTS demo on its own
 ```sh
@@ -287,8 +287,9 @@ For best results: voice-prompt transcript must match the audio word-for-word, ai
 If you need a checkpoint tuned to a specific voice for a legitimate use case (audiobooks, accessibility, game characters, dubbing of consenting performers, internal tooling), **get in touch** via [fluxions.ai](https://fluxions.ai) — we can train, license, or host one for you.
 
 ```python
-# Requires an NVIDIA GPU — Engine is built on CUDA graphs. On Apple Silicon
-# use `python demo.py` (auto-routes to MLX) or vui.mlx.tts instead.
+# On NVIDIA this is the CUDA-graph engine (continuous batching, streaming);
+# on Apple Silicon Engine() auto-dispatches to a single-row MLX backend with
+# the same Row API (prefill / render / stream / rewind).
 from vui.engine import Engine, GenConfig
 
 engine = Engine()  # loads "vui-190k.safetensors" from HuggingFace by default
@@ -298,6 +299,8 @@ with engine.new_row() as row:
         GenConfig(temperature=0.7),
     )
 ```
+
+**Original-release (pre-1.0) checkpoints** — `vui-100m-base.pt`, `vui-cohost-100m.pt`, `vui-abraham-100m.pt` — use an older architecture and don't load into `Engine`. They still work via `vui.legacy`: `from vui.legacy import Vui, render; audio = render(Vui.from_pretrained("vui-cohost-100m.pt").eval(), "Hello!")` (22 kHz output, faster than real-time on CPU — no GPU or flash-attn needed). On Apple Silicon, `vui.mlx.legacy.load_legacy_mlx` runs the transformer on MLX at ~4.5× real-time. Details: [`docs/legacy.md`](docs/legacy.md).
 
 **Tip: try turning repetition penalty off.** `GenConfig` defaults `rep_penalty=1.1` to break long silence/filler loops, but it can flatten prosody and distort natural repetition. Setting it to `0` (anything `<= 1.0` disables the penalty path, see `inference.py:539`) often gives more natural-sounding output — worth trying if generations sound stilted or over-corrected.
 

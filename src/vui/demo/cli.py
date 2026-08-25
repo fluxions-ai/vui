@@ -125,60 +125,96 @@ def run(
     state.teardown()
 
 
+def _mlx_prompt(engine, row, prompt_file: str) -> bool:
+    """Prefill `row` with a voice prompt. Official voices (maeve/abraham/...)
+    use the pre-baked HF safetensors; other wavs are encoded locally with the
+    torch codec encoder + a sibling .txt transcript (mlx_whisper if missing)."""
+    from vui.engine import Segment
+    from vui.mlx.engine import load_official_prompt
+
+    voice = Path(prompt_file).stem
+    try:
+        text, codes, spk_token, cond_bias = load_official_prompt(voice)
+        if cond_bias is not None:
+            engine.cond_bias = cond_bias
+        row.prefill([Segment(text=text, codes=codes)], spk_emb=spk_token)
+        print(f"  Prompt '{voice}': '{text[:60]}' ({codes.shape[0]} frames)")
+        return True
+    except Exception:
+        pass
+
+    if not Path(prompt_file).exists():
+        print(f"  No prompt at {prompt_file}; rendering unprompted")
+        return False
+
+    from julius.resample import resample_frac
+
+    from vui.qwen_codec import QwenCodecEncoder
+    from vui.qwen_spk_enc import QwenSpeakerEncoder
+
+    wav = AudioDecoder(prompt_file, sample_rate=16000, num_channels=1)
+    audio_16k = wav.get_all_samples().data.squeeze(0)
+    audio_24k = resample_frac(audio_16k.unsqueeze(0), 16000, QWEN_SR)
+
+    txt_path = Path(prompt_file).with_suffix(".txt")
+    if txt_path.exists():
+        text = txt_path.read_text().strip()
+    else:
+        import mlx_whisper
+
+        text = mlx_whisper.transcribe(
+            audio_16k.numpy(),
+            path_or_hf_repo="mlx-community/whisper-large-v3-turbo",
+            language="en",
+            verbose=False,
+        )["text"].strip()
+
+    enc = QwenCodecEncoder.from_pretrained().cpu().float().eval()
+    with torch.inference_mode():
+        codes = enc.encode(audio_24k.float().unsqueeze(0))
+    codes_tq = codes[0, : engine.Q].T.long().cpu()
+    spk_emb = QwenSpeakerEncoder.from_pretrained().embed(
+        audio_24k.squeeze(0), sr=int(QWEN_SR)
+    )
+    row.prefill([Segment(text=text, codes=codes_tq)], spk_emb=spk_emb)
+    print(f"  Prompt (encoded): '{text[:60]}' ({codes_tq.shape[0]} frames)")
+    return True
+
+
 def run_mlx(
     checkpoint_path: str,
     prompt_file: str = "prompts/harry.wav",
     text: str | None = None,
     **overrides,
 ):
-    """MLX one-shot render (Apple Silicon / no CUDA). Reuses MLXTTSEngine."""
-    import queue
-    import threading
+    """MLX one-shot render (Apple Silicon / no CUDA) via the Engine API."""
+    from vui.engine import Engine, GenConfig
 
-    from vui.serving.stream.tts_worker_mlx import MLXTTSEngine
-
-    engine = MLXTTSEngine.from_checkpoint(checkpoint_path)
-
-    settings = {
-        "temperature": 0.9,
-        "max_duration": overrides.get("max_secs", 30.0),
-        "n_codebooks": overrides.get("n_codebooks", 0),
-    }
-    if "temperature" in overrides:
-        settings["temperature"] = overrides["temperature"]
-
-    prompt_path = Path(prompt_file)
-    if prompt_path.exists():
-        engine._load_prompt_by_name(prompt_path.stem, settings)
+    engine = Engine(checkpoint_path)
+    cfg = GenConfig(
+        temperature=overrides.get("temperature", 0.9),
+        max_secs=overrides.get("max_secs", 30.0),
+        eos_threshold=overrides.get("eos_threshold", 0.45),
+        n_codebooks=overrides.get("n_codebooks", 0),
+    )
 
     out_dir = Path("outputs")
     out_dir.mkdir(exist_ok=True)
 
-    audio_queue: queue.Queue = queue.Queue()
-    t0 = time.perf_counter()
-    engine.generate(
-        simple_clean(text), settings, threading.Event(), audio_queue=audio_queue
-    )
-    dt = time.perf_counter() - t0
+    with engine.new_row() as row:
+        _mlx_prompt(engine, row, prompt_file)
+        t0 = time.perf_counter()
+        _codes, full_audio = row.render(simple_clean(text), cfg)
+        dt = time.perf_counter() - t0
 
-    audio_chunks = []
-    while not audio_queue.empty():
-        msg = audio_queue.get_nowait()
-        if msg.get("type") == "audio":
-            audio_chunks.append(msg["data"])
-
-    if not audio_chunks:
+    if full_audio.shape[-1] == 0:
         print("  Generation failed")
         return
 
-    full_audio = torch.cat(audio_chunks, dim=-1)
     dur = full_audio.shape[-1] / QWEN_SR
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     save_file = str(out_dir / f"render_{ts}.wav")
-    encoded = AudioEncoder(
-        full_audio.squeeze().cpu().float().unsqueeze(0), sample_rate=int(QWEN_SR)
-    )
-    encoded.to_file(save_file)
+    AudioEncoder(full_audio.squeeze(0), sample_rate=int(QWEN_SR)).to_file(save_file)
     print(f"  {dur:.1f}s in {dt:.2f}s ({dur/dt:.1f}x RTF) -> {save_file}")
     subprocess.Popen(
         ["play", save_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
