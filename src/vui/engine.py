@@ -303,9 +303,8 @@ class Engine:
                 raise RuntimeError(
                     "Engine requires CUDA — it captures CUDA graphs for "
                     "decode — and the MLX fallback is unavailable "
-                    f"({e}). On Apple Silicon install the mlx extra "
-                    "(`uv sync --extra mlx`); other platforms need an "
-                    "NVIDIA GPU."
+                    f"({e}). On Apple Silicon mlx installs automatically "
+                    "(re-run `uv sync`); other platforms need an NVIDIA GPU."
                 ) from e
             print("[Engine] No CUDA — using MLX backend (single row)")
             return MLXEngine(*args, **kwargs)

@@ -45,12 +45,18 @@ dependencies = [
     # ctranslate2 (faster-whisper) dlopens libcublas.so.12 at import time;
     # torch brings cu13. This supplies the cu12 ABI ctranslate2 needs.
     "nvidia-cublas-cu12 ; sys_platform == 'linux'",
+    # MLX backend — automatic on Apple Silicon so Engine()'s auto-dispatch
+    # works out of the box (same marker mechanism as flash-attn above).
+    "mlx>=0.18 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-whisper>=0.4 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [project.optional-dependencies]
+# Kept as an alias for older instructions (`uv sync --extra mlx`) — the mlx
+# deps now install automatically on Apple Silicon via the markers above.
 mlx = [
-    "mlx>=0.18",
-    "mlx-whisper>=0.4",
+    "mlx>=0.18 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-whisper>=0.4 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 # CPU-streaming ASR backend (Moonshine). Optional — faster-whisper covers the
 # default GPU path. Pull this in if you want VUI_ASR=moonshine to work.

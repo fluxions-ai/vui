@@ -120,7 +120,7 @@ Then:
 
 ```sh
 uv sync                  # base + flash-attn pre-built wheel on Linux (x86_64 + aarch64)
-uv sync --extra mlx      # add for Apple Silicon
+# Apple Silicon: MLX installs automatically (platform markers) — plain `uv sync` is enough
 ```
 
 Pre-built flash-attn wheels are pinned for Linux x86_64 and aarch64, so ARM
