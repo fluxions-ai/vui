@@ -23,9 +23,10 @@ def reject_legacy_checkpoint(state_dict: dict, source: str = "checkpoint"):
         raise ValueError(
             f"{source} is a legacy checkpoint from the original vui release "
             "(per-quantizer audio_embeddings/audio_heads, no rq_transformer) "
-            "and does not match the current architecture. Use "
-            "'vui-190k.safetensors' (default) or 'vui-nano.safetensors' from "
-            "https://huggingface.co/fluxions/vui instead."
+            "and does not match the current architecture. Load it with "
+            "vui.legacy instead (`from vui.legacy import Vui, render`), or "
+            "use a current checkpoint: 'vui-190k.safetensors' (default) or "
+            "'vui-nano.safetensors' from https://huggingface.co/fluxions/vui."
         )
 
 

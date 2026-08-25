@@ -2,7 +2,7 @@
 
 Most users will reach `vui.engine.Engine` directly — for one-shot rendering, batch jobs, custom pipelines, or anywhere the streaming server's HTTP/WS surface is overkill. This doc covers the public API: loading, prompt encoding (with proper multi-segment chunking for long references), rendering, and streaming.
 
-CUDA-only. For the Apple-Silicon MLX path see [the bottom of this doc](#apple-silicon-mlx).
+On Apple Silicon, `Engine()` auto-dispatches to a single-row MLX backend with the same Row API — see [the bottom of this doc](#apple-silicon-mlx) for what differs. Continuous batching (`max_rows > 1`, `render_continuous` / `render_all`) is CUDA-only.
 
 ## Minimal example
 
@@ -223,17 +223,31 @@ The `ctx=6` parameter prepends 6 frames (~500ms) of codec context to smooth chun
 
 **Status:** TTS inference on MLX is working — quantized vui-190k renders voice-prompted speech end-to-end at ~1.5× real-time on M4, and `load_quantized` auto-downloads the pre-baked int8/int4 weights (no torch float32-load-and-quantize step; torch is still used to encode prompt audio). The wider MLX stack (ASR, streaming-server integration) is still WIP.
 
-The MLX path is a separate code surface (`vui.mlx.tts.*`) — same model, different runtime. The end-to-end equivalent of the chunked-prompt flow above is `demo.py:generate_chunked_mlx` (lines ~167–275). Key differences:
+**`Engine()` works here.** On a machine without CUDA, `Engine()` returns `vui.mlx.engine.MLXEngine`, which implements the same Row API (`prefill` / `add_user` / `render` / `stream` / `rewind` / `reset`) backed by MLX — so the minimal example above runs unchanged. What differs from the CUDA engine:
 
-- Loaded via `vui.mlx.tts.weights.load_quantized(ckpt_path, "float32"|"int8"|"int4")`.
-- No `Engine` class; you call `vui.mlx.tts.generate.generate` per chunk and the prompt is prefilled via `vui.mlx.tts.generate.prefill_prompt` (single segment) or by manually iterating segments with `[spk] [text_i] [audio_i]` (`_prefill_segments_mlx` in demo.py).
-- No streaming primitive — chunks are generated one at a time and concatenated.
+- **Single row only.** `max_rows` must be 1; continuous batching (`render_continuous` / `render_all`) and two-speaker prefill are CUDA-only.
+- **No gates.** The entropy gate (`gate_frames`) and babble probe gate aren't wired up; those `GenConfig` fields are ignored. Repetition-penalty state is per-chunk rather than per-render-call.
+- **Precision.** Loads int8 quantized weights by default (`VUI_MLX_PRECISION=float32|int8|int4` to override); the pre-baked weights auto-download on first run.
+- **Official voices need no torch encoder.** `vui.mlx.engine.load_official_prompt("maeve")` returns `(transcript, codes, spk_token, cond_bias)` from the pre-baked HF prompt safetensors:
 
-If you're on M-series and want chunked-prompt MLX rendering, mirror `generate_chunked_mlx`'s `_prefill_segments_mlx` call after building segments with `build_prompt_segments` (the prompt-utils function is backend-agnostic; only the encoder callback needs to be MLX-friendly).
+```python
+from vui.engine import Engine, GenConfig, Segment
+from vui.mlx.engine import load_official_prompt
+
+engine = Engine()
+text, codes, spk_token, cond_bias = load_official_prompt("maeve")
+engine.cond_bias = cond_bias
+with engine.new_row() as row:
+    row.prefill([Segment(text=text, codes=codes)], spk_emb=spk_token)
+    codes_out, audio = row.render("Hello!", GenConfig(temperature=0.7))
+```
+
+For arbitrary voice prompts, build segments with `build_prompt_segments` as on CUDA — encoding prompt audio still uses the torch codec encoder (CPU is fine). The lower-level primitives (`vui.mlx.tts.generate`, `vui.mlx.tts.stream.TTSStream`) remain available for custom loops.
 
 ## See also
 
 - [`prompting.md`](prompting.md) — text-side rules (tags, punctuation, phonetic numbers, `|spell|` escape for hard words).
+- [`legacy.md`](legacy.md) — running the original-release (pre-1.0) 100M checkpoints via `vui.legacy`, including the MLX decoder for Apple Silicon.
 - [`memory-budget.md`](memory-budget.md) — VRAM breakdown per component, `n_codebooks` tradeoffs, `max_rows` budgeting.
 - [`configuration.md`](configuration.md) — env-var overrides for the streaming server's defaults.
 - `src/vui/demo/cli.py` — full working CLI render with streaming playback, prompt loading, settings, and tab-completion.
