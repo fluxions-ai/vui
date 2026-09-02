@@ -14,9 +14,10 @@ CODEC_HZ = 12.5
 
 def _sample_top_k(logits: mx.array, top_k: int) -> mx.array:
     top_vals = mx.topk(logits, top_k, axis=-1)
-    return mx.random.categorical(
-        mx.where(logits < top_vals[:, -1:], mx.array(-1e9), logits)
-    )
+    # mx.topk gives no order guarantee (it's argpartition-backed and happens to
+    # come back ascending), so take the k-th largest as an explicit min.
+    thresh = mx.min(top_vals, axis=-1, keepdims=True)
+    return mx.random.categorical(mx.where(logits < thresh, mx.array(-1e9), logits))
 
 
 class RepPenalty:
