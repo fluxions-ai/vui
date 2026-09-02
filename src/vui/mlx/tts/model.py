@@ -333,7 +333,8 @@ class RQTransformer(nn.Module):
         logits_0 = logits_0 / temperature
         if top_k is not None:
             top_vals = mx.topk(logits_0, top_k, axis=-1)
-            logits_0 = mx.where(logits_0 < top_vals[:, -1:], mx.array(-1e9), logits_0)
+            thresh = mx.min(top_vals, axis=-1, keepdims=True)
+            logits_0 = mx.where(logits_0 < thresh, mx.array(-1e9), logits_0)
         next_code = mx.random.categorical(logits_0)
         codes = [code_0, next_code]
 
@@ -349,9 +350,8 @@ class RQTransformer(nn.Module):
             logits_i = logits_i / temperature
             if top_k is not None:
                 top_vals = mx.topk(logits_i, top_k, axis=-1)
-                logits_i = mx.where(
-                    logits_i < top_vals[:, -1:], mx.array(-1e9), logits_i
-                )
+                thresh = mx.min(top_vals, axis=-1, keepdims=True)
+                logits_i = mx.where(logits_i < thresh, mx.array(-1e9), logits_i)
             next_code = mx.random.categorical(logits_i)
             codes.append(next_code)
 
