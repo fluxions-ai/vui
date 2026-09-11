@@ -4,6 +4,8 @@
 
 <h1 align="center">Vui — Streaming Conversational Voice Assistant</h1>
 
+<p align="center"><strong>Powered by Vui Nano — a small, context-aware text-to-speech model trained on real conversations: 219M active parameters (305M total), Apache 2.0, voice cloning, real-time streaming, runs on CPU</strong></p>
+
 <p align="center"><em>Pronounced "vooey"</em> (rhymes with <em>Louie</em>) · by <a href="https://fluxions.ai">fluxions.ai</a></p>
 
 <p align="center">
@@ -22,19 +24,27 @@
 
 **Vui** is short for **V**oice **U**ser **I**nterface — the layer that lets you talk to a computer and have it talk back.
 
-Vui is a real-time voice assistant: speak into your mic, the model transcribes, runs a local LLM, and streams a TTS reply back — all from a single Python server. Built around **Vui Nano**, a 300M speech transformer based on the Qwen3 TTS. Trained on conversational speech with breaths, laughter, hesitations, and multi-speaker dialogue.
+Vui is a real-time voice assistant: speak into your mic, the model transcribes, runs a local LLM, and streams a TTS reply back — all from a single Python server.
+
+It is built around **Vui Nano — a small, context-aware text-to-speech model trained on real conversations: 219M active parameters (305M total), Apache 2.0, with voice cloning, real-time streaming, and a dependency-free C build that runs on CPU.**
+
+Most TTS models synthesise one utterance in isolation. Vui Nano generates each reply *inside the conversation*: the whole dialogue so far — your text **and the actual audio of your turn** — lives in the KV cache it decodes from, across a ~6-minute context. It was trained on two-speaker dialogue with an explicit speaker-change token, so it carries prosody across turns and produces the things real speech has and read-aloud corpora don't: breaths, laughter, hesitations, and overlap.
+
+Want the TTS model on its own, without the assistant? See [Vui Nano](#vui-nano) for the model card, `demo.py` for a standalone Gradio playground, and [`cpu/`](cpu/README.md) for the single-binary CPU build.
 
 > **Want the latest models and production-grade turn-taking?** This repo is the open core. Our [production API](https://fluxions.ai) ships ongoing model updates and a more advanced turn-taking system, on hardened, low-latency infrastructure built for scale. Get in touch at [fluxions.ai](https://fluxions.ai).
 
 ## Features
 
-- **Vui Nano (300M)** — Llama-style decoder + RQ-Transformer head over the Qwen3-TTS-12Hz codec
+- **Vui Nano (219M active, 305M total)** — a small, context-aware TTS model trained on real conversations: Llama-style decoder + RQ-Transformer head over the Qwen3-TTS-12Hz codec, Apache 2.0
+- **Conversation-conditioned generation** — replies are decoded from a KV cache holding the whole dialogue, including the audio of your turn, so prosody carries across turns (~6-minute context)
 - **Real-time voice loop** — WebRTC + WebSocket pipeline (ASR → LLM → TTS) with a browser UI, VAD-driven turn taking, speculative LLM prefill while you're still speaking, sentence-level TTS chunking with backpressure
 - **Barge-in** — start talking mid-reply, the model cancels and listens
 - **Streaming TTS** — ~9× realtime on a 4090, bf16 inference, CUDA graphs
 - **OpenAI Realtime API compatible** — drop-in `ws://…/v1/realtime` for clients written against OpenAI's spec ([`docs/realtime-api.md`](docs/realtime-api.md))
 - **One-shot voice-note REST endpoint** — `POST /v1/voice-note` runs the whole ASR → LLM → TTS pipeline in a single HTTP call (audio in, JSON out)
 - **Standalone TTS demo** — `demo.py` Gradio playground for the model on its own
+- **CPU inference, zero dependencies** — a pure-C engine ([`cpu/`](cpu/README.md)): one binary plus one weight file, no Python, PyTorch, or ONNX at runtime; supports voice cloning and streaming playback
 - **Voice cloning** — upload an audio sample to clone any speaker; 4 fine-tuned presets shipped (`maeve`, `abraham`, `rhian`, `harry`)
 - **SQ / WPS conditioning** — bias generation on six speech-quality channels and words-per-second
 - **Hot-swap models** — pick Ollama LLM and ASR backend live from the UI
@@ -271,12 +281,48 @@ Adding your own tool is one file in `src/vui/serving/stream/tools/` then `POST /
 
 ## Vui Nano
 
-A 300M autoregressive LM over the Qwen3-TTS speech codec — the first in the Vui model family. The codec and speaker encoder are reused from Alibaba's [`Qwen3-TTS-12Hz-0.6B-Base`](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base);
+A small autoregressive LM over the Qwen3-TTS speech codec — **219M active parameters, 305M total** — and the first in the Vui model family. The codec and speaker encoder are reused from Alibaba's [`Qwen3-TTS-12Hz-0.6B-Base`](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base);
 
-- **300M parameters**, Llama-style decoder + RQ-Transformer head — 768 dim, 22 layers, 8 heads
+- **218,623,489 active parameters** of 305,356,033 total (71.6%) — the remaining 86,732,544 are embedding lookup tables that cost zero FLOPs. Llama-style decoder + RQ-Transformer head — 768 dim, 22 layers, 8 heads
 - **Codec**: [Qwen3-TTS-Tokenizer-12Hz](https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz) — 16 codebooks of 2048 entries at 12.5 Hz, 24 kHz audio (decoded), pure-PyTorch reimplementation in `src/vui/qwen_codec.py`
 - **Speaker encoder**: ECAPA-TDNN from `Qwen3-TTS-12Hz-0.6B-Base` (8.9M params, 1024-dim) — used at training time to embed reference speakers
-- **Output**: 16 kHz audio, bf16 inference, ~9× realtime streaming on a 4090
+- **Output**: 16 kHz audio, bf16 inference (611 MB on disk), ~9× realtime streaming on a 4090
+- **Conversation context**: ~6 minutes (4500 frames at 12.5 Hz). A turn is written into the KV cache as `text [SC] codes` — the user's words *and* their audio — so generation is conditioned on the dialogue so far, not just the sentence being spoken (`Row.add_user`, `src/vui/engine.py`)
+- **Trained on dialogue**: two-speaker alternating turns with an explicit `[SC]` speaker-change token, plus 21 paralinguistic tokens — `[breath]`, `[laugh]`, `[hesitate]`, `[sigh]`, `[overlap]`, `[tut]`, `[mouthnoise]` … (`src/vui/tokenizer.py`)
+- **License**: Apache 2.0, weights included — commercial use permitted
+
+### Where the parameters go
+
+| Component | Params | Share | Lookup only |
+|---|---:|---:|:---:|
+| Backbone — 22 layers | 155,748,096 | 51.0% | |
+| Text embedding (49,429 × 768) | 37,961,472 | 12.4% | ✓ |
+| RQ transformer — 5 layers | 35,397,120 | 11.6% | |
+| Audio embedding (16 × 2048) | 25,165,824 | 8.2% | ✓ |
+| RQ code embedding (15 × 2048) | 23,592,960 | 7.7% | ✓ |
+| RQ output heads `head_W` (15 × 2048 × 768) | 23,592,960 | 7.7% | |
+| SQ / WPS / speaker projectors | 2,310,912 | 0.8% | |
+| `codec_head` + `eos_head` + final norm | 1,574,401 | 0.5% | |
+| RQ position embedding (16 × 768) | 12,288 | 0.0% | ✓ |
+| **Total** | **305,356,033** | | |
+| *Lookup only (zero FLOPs)* | *86,732,544* | *28.4%* | |
+| **Active in the compute path** | **218,623,489** | **71.6%** | |
+
+The compute-weighted picture inverts. Per 80 ms audio frame the backbone runs **once**, but the RQ transformer runs **15 times** — once per quantizer after the first:
+
+| Stage | MACs / frame | Share |
+|---|---:|---:|
+| RQ transformer — 5 layers × 15 steps | 530,841,600 | 74.6% |
+| Backbone — 22 layers × 1 step | 155,713,536 | 21.9% |
+| `head_W` × 15 | 23,592,960 | 3.3% |
+| `codec_head` × 1 | 1,572,864 | 0.2% |
+| **Total** | **711,720,960** | |
+
+So the 35M-parameter RQ head — 11.6% of the weights — is three-quarters of the arithmetic, which is why it is the thing to optimise and why `n_codebooks` moves latency so much: dropping 16 → 10 cuts per-frame MACs by 31%, 16 → 8 by 42%.
+
+One realtime stream is ~17.8 GFLOP/s (12.5 frames/s × 2 × 711.7 MMAC). Against a 4090's dense bf16 throughput that is well under 1% utilisation — Vui Nano is latency- and memory-bound, not compute-bound, which is what the CUDA graphs and KV-cache paths exist to address.
+
+<sub>Figures computed directly from the `vui-nano.safetensors` tensor shapes and the decode paths in `src/vui/model.py`; MAC counts cover the KV-cached decode step and exclude attention score/value matmuls, which are sequence-length dependent.</sub>
 
 ### Voices & voice cloning
 
