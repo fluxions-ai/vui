@@ -68,7 +68,9 @@ Want the TTS model on its own, without the assistant? See [Vui Nano](#vui-nano) 
 curl -fsSL https://install.fluxions.ai | bash
 ```
 
-Clones into `~/vui`, auto-detects Docker vs. native, installs deps (uv, Ollama, ffmpeg, Claude Code CLI), pulls the model, and launches the stack on <http://localhost:8080>. Flags (`--docker`, `--native`, `--no-claude`, `--upgrade`, `--model <name>`, `--dry-run`) forward to `install.sh` — see `./install.sh --help` from the clone for the full list.
+Clones into `~/vui`, auto-detects Docker vs. native, installs deps (uv, Ollama, ffmpeg, Claude Code CLI), pulls the Ollama LLM, and launches the stack on <http://localhost:8080>. The TTS weights are not pulled here — they download from Hugging Face on first render.
+
+Flags (`--docker`, `--native`, `--no-claude`, `--no-launch`, `--upgrade`, `--model <name>`, `--dry-run`) forward to `install.sh` — see `./install.sh --help` from the clone for the full list. Note `--model` selects the **Ollama LLM** (default `qwen3.5:4b`), not the TTS checkpoint; to change that, pass a name or path to `Engine()`.
 
 ## Quick start (docker-compose, recommended)
 
