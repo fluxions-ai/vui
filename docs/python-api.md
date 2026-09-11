@@ -1,6 +1,6 @@
 # Calling the Engine from Python
 
-Most users will reach `vui.engine.Engine` directly — for one-shot rendering, batch jobs, custom pipelines, or anywhere the streaming server's HTTP/WS surface is overkill. This doc covers the public API: loading, prompt encoding (with proper multi-segment chunking for long references), rendering, and streaming.
+Install with `pip install vui-tts` (engine only — CUDA or MLX; add `[server]` for the assistant) or from a checkout with `uv sync`. Most users will reach `vui.engine.Engine` directly — for one-shot rendering, batch jobs, custom pipelines, or anywhere the streaming server's HTTP/WS surface is overkill. This doc covers the public API: loading, prompt encoding (with proper multi-segment chunking for long references), rendering, and streaming.
 
 On Apple Silicon, `Engine()` auto-dispatches to a single-row MLX backend with the same Row API — see [the bottom of this doc](#apple-silicon-mlx) for what differs. Continuous batching (`max_rows > 1`, `render_continuous` / `render_all`) is CUDA-only.
 

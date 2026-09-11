@@ -29,7 +29,7 @@ COPY src ./src
 # CTranslate2 (faster-whisper) links against — we run on a CUDA 13 base
 # image (for the flash-attn cu130 wheel), so they coexist via LD_LIBRARY_PATH.
 RUN uv venv --python 3.12 /opt/venv \
-    && uv pip install --no-cache "." \
+    && uv pip install --no-cache ".[server]" \
     && uv pip install --no-cache nvidia-cublas-cu12 nvidia-cudnn-cu12
 
 ENV LD_LIBRARY_PATH=/opt/venv/lib/python3.12/site-packages/nvidia/cublas/lib:/opt/venv/lib/python3.12/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}

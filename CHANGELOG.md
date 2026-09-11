@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-12
+
 ### Added
+
+- **On PyPI as [`vui-tts`](https://pypi.org/project/vui-tts/).** `pip install
+  vui-tts` is the inference engine only — `vui.engine.Engine`, the codec,
+  prompts, MLX on Apple Silicon — sized for integrations (Pipecat, LiveKit).
+  The voice assistant (WebRTC server, ASR, demo UI, task server) is the
+  `server` extra: `pip install "vui-tts[server]"`; a checkout's `uv sync`
+  still installs everything via the dev group. The import name stays `vui`
+  (the bare `vui` distribution on PyPI is an unrelated package).
+  `install.sh` and the Dockerfiles request `[server]`.
+- `Engine.checkpoint` (CUDA and MLX): the checkpoint the engine loaded, which
+  keys checkpoint-specific assets such as the voice-prompt folder. The MLX
+  engine previously did not record it, so the official-prompt loader fell
+  back to the root (`vui-nano`-baked) prompts on Apple Silicon.
 
 - **Runs on more than Ampere-and-newer.** The model hardcoded bf16 and the
   install hardcoded FlashAttention-2, so anything below compute capability 8.0

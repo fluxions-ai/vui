@@ -27,7 +27,7 @@ COPY pyproject.toml ./
 COPY src ./src
 
 RUN uv venv --python 3.12 /opt/venv \
-    && uv pip install --no-cache ".[claude]"
+    && uv pip install --no-cache ".[claude,server]"
 
 EXPOSE 8642
 

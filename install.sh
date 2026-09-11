@@ -369,7 +369,9 @@ run_native() {
     detect_gpu
     resolve_torch_backend
 
-    local extras=()
+    # The package on its own is the inference engine (what `pip install
+    # vui-tts` gives integrations); the assistant is the `server` extra.
+    local extras=(--extra server)
     [[ "$OS" == "Darwin" && "$ARCH" == "arm64" ]] && extras+=(--extra mlx)
     # flash-attn only where its kernels exist (Ampere+). Below that
     # vui.flash_compat uses SDPA, so installing it would just waste the
