@@ -43,7 +43,7 @@ def test_capability_flags():
 
 
 def test_unknown_backend_names_the_valid_options():
-    with pytest.raises(ValueError, match="expected 'ollama' or 'vllm'"):
+    with pytest.raises(ValueError, match="expected 'ollama', 'vllm' or 'litellm'"):
         make_backend("bogus")
 
 
