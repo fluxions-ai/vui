@@ -11,9 +11,9 @@ format, thinking-mode flag) into a uniform API:
     backend.prefill(messages) -> None                      # warm KV (default = complete max_tokens=1)
 
 Pick at startup via env:
-    VUI_LLM_BACKEND=ollama|vllm
-    VUI_OLLAMA_URL / VUI_VLLM_URL    (defaults: localhost:11434 / localhost:8000)
-    VUI_OLLAMA_MODEL / VUI_VLLM_MODEL
+    VUI_LLM_BACKEND=ollama|vllm|litellm
+    VUI_OLLAMA_URL / VUI_VLLM_URL / VUI_LITELLM_URL
+    VUI_OLLAMA_MODEL / VUI_VLLM_MODEL / VUI_LITELLM_MODEL
 """
 
 from __future__ import annotations
@@ -501,6 +501,179 @@ class VLLMBackend(LLMBackend):
             return [self.model]
 
 
+class LiteLLMBackend(LLMBackend):
+    """Backend for LiteLLM proxy — routes to 100+ LLM providers."""
+
+    name = "litellm"
+
+    def __init__(
+        self,
+        model: str = "openai/gpt-4o-mini",
+        base_url: str = "http://localhost:4000",
+        *,
+        sampling: dict | None = None,
+    ):
+        super().__init__(model=model, base_url=base_url, sampling=sampling)
+
+    def _body(
+        self,
+        messages,
+        *,
+        stream,
+        max_tokens,
+        temperature,
+        top_k,
+        top_p,
+        presence_penalty,
+        stop,
+        tools=None,
+    ) -> dict:
+        s = self._resolve_sampling(
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            presence_penalty=presence_penalty,
+        )
+        body: dict = {
+            "model": self.model,
+            "messages": messages,
+            "stream": stream,
+            "max_tokens": max_tokens,
+            "temperature": s["temperature"],
+        }
+        if stop:
+            body["stop"] = stop
+        if tools:
+            body["tools"] = tools
+        return body
+
+    def _record_stats(self, stats: dict | None, usage: dict | None):
+        if stats is None or not usage:
+            return
+        pt = usage.get("prompt_tokens", 0)
+        ct = usage.get("completion_tokens", 0)
+        stats["prompt_tokens"] = pt
+        stats["completion_tokens"] = ct
+        stats["ctx_used"] = pt + ct
+        stats["ctx_max"] = 0
+
+    async def stream(
+        self,
+        messages,
+        *,
+        max_tokens: int = 512,
+        temperature: float | None = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        presence_penalty: float | None = None,
+        stop: list[str] | None = None,
+        stats: dict | None = None,
+    ) -> AsyncIterator[str]:
+        body = self._body(
+            messages,
+            stream=True,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            presence_penalty=presence_penalty,
+            stop=stop,
+        )
+        body["stream_options"] = {"include_usage": True}
+        client = self._client_inst()
+        async with client.stream(
+            "POST", f"{self.base_url}/v1/chat/completions", json=body
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:].strip()
+                if payload == "[DONE]":
+                    return
+                try:
+                    d = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                choices = d.get("choices") or []
+                if choices:
+                    delta = choices[0].get("delta") or {}
+                    tok = delta.get("content") or ""
+                    if tok:
+                        yield tok
+                if "usage" in d:
+                    self._record_stats(stats, d.get("usage"))
+
+    async def complete(
+        self,
+        messages,
+        *,
+        max_tokens: int = 1024,
+        temperature: float | None = 0.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        presence_penalty: float | None = None,
+        tools: list[dict] | None = None,
+        stop: list[str] | None = None,
+        stats: dict | None = None,
+    ) -> dict:
+        body = self._body(
+            messages,
+            stream=False,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            presence_penalty=presence_penalty,
+            stop=stop,
+            tools=tools,
+        )
+        client = self._client_inst()
+        resp = await client.post(f"{self.base_url}/v1/chat/completions", json=body)
+        resp.raise_for_status()
+        d = resp.json()
+        choice = (d.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        usage = d.get("usage") or {}
+        self._record_stats(stats, usage)
+        tool_calls = msg.get("tool_calls") or None
+        if tool_calls:
+            normalised = []
+            for tc in tool_calls:
+                fn = (tc.get("function") or {}).copy()
+                args = fn.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        fn["arguments"] = json.loads(args) if args else {}
+                    except json.JSONDecodeError:
+                        fn["arguments"] = {}
+                normalised.append({**tc, "function": fn})
+            tool_calls = normalised
+        return {
+            "content": msg.get("content", "") or "",
+            "tool_calls": tool_calls,
+            "usage": {
+                "prompt": usage.get("prompt_tokens", 0),
+                "completion": usage.get("completion_tokens", 0),
+                "ctx_used": usage.get("prompt_tokens", 0)
+                + usage.get("completion_tokens", 0),
+                "ctx_max": 0,
+            },
+            "done_reason": choice.get("finish_reason"),
+        }
+
+    async def list_models(self) -> list[str]:
+        client = self._client_inst()
+        try:
+            r = await client.get(f"{self.base_url}/v1/models", timeout=5)
+            return [m.get("id", "") for m in r.json().get("data", []) if m.get("id")]
+        except Exception:
+            return [self.model]
+
+    async def set_model(self, name: str) -> None:
+        self.model = name
+
+
 def make_backend(name: str | None = None, model: str | None = None) -> LLMBackend:
     name = (name or os.environ.get("VUI_LLM_BACKEND", "ollama")).lower()
     if name == "vllm":
@@ -512,6 +685,11 @@ def make_backend(name: str | None = None, model: str | None = None) -> LLMBacken
         return OllamaBackend(
             model=model or os.environ.get("VUI_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL),
             base_url=os.environ.get("VUI_OLLAMA_URL", "http://localhost:11434"),
+        )
+    if name == "litellm":
+        return LiteLLMBackend(
+            model=model or os.environ.get("VUI_LITELLM_MODEL", "openai/gpt-4o-mini"),
+            base_url=os.environ.get("VUI_LITELLM_URL", "http://localhost:4000"),
         )
     raise ValueError(f"unknown VUI_LLM_BACKEND: {name!r}")
 
