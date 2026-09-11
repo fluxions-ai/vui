@@ -65,7 +65,11 @@ def run(
         with torch.inference_mode():
             codes = codec_enc.encode(audio_24k.half().cuda().unsqueeze(0))
             prompt_codes = codes[0, :Q].T.long()  # (T, Q)
-        prompt_text = asr(audio_16k)
+        # Exact transcript from a sibling .safetensors (metadata) or .txt
+        # beats ASR: the release voices ship with disfluencies spelled out.
+        from vui.prompt_files import prompt_transcript
+
+        prompt_text = prompt_transcript(pf) or asr(audio_16k)
         del codec_enc
         torch.cuda.empty_cache()
         # Free ASR
@@ -134,7 +138,9 @@ def _mlx_prompt(engine, row, prompt_file: str) -> bool:
 
     voice = Path(prompt_file).stem
     try:
-        text, codes, spk_token, cond_bias = load_official_prompt(voice)
+        text, codes, spk_token, cond_bias = load_official_prompt(
+            voice, checkpoint=getattr(engine, "_loaded_ckpt", None)
+        )
         if cond_bias is not None:
             engine.cond_bias = cond_bias
         row.prefill([Segment(text=text, codes=codes)], spk_emb=spk_token)
@@ -156,10 +162,10 @@ def _mlx_prompt(engine, row, prompt_file: str) -> bool:
     audio_16k = wav.get_all_samples().data.squeeze(0)
     audio_24k = resample_frac(audio_16k.unsqueeze(0), 16000, QWEN_SR)
 
-    txt_path = Path(prompt_file).with_suffix(".txt")
-    if txt_path.exists():
-        text = txt_path.read_text().strip()
-    else:
+    from vui.prompt_files import prompt_transcript
+
+    text = prompt_transcript(prompt_file)
+    if not text:
         import mlx_whisper
 
         text = mlx_whisper.transcribe(

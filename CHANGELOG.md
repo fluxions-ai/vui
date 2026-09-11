@@ -7,8 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **New default checkpoint: `vui-nano-1.1`.** RL-tuned from `vui-190k` (the
+  `v6 ck18` checkpoint that has served the production API since 2026-08-18).
+  Same architecture and prompt format (6-channel SQ conditioning). Paired 12-line eval against `vui-190k`
+  with the public engine: WER 9.4% → 2.9%, lines over 10% WER 5 → 0, 9.1×
+  realtime on a 4090; over 2400 production renders catastrophic failures fell
+  1.54% → 0.71%. `Engine()`, `demo.py`, `python -m vui.serving.stream` and the
+  MLX engine all default to it; `vui-190k` and `vui-nano` remain selectable by
+  name. The babble probe gate stays tied to `vui-190k` and is not loaded for
+  1.1 (the RL checkpoint does not need it).
+- **Per-checkpoint voice prompts.** `prompts/` on the Hub now has a
+  `vui-nano-1.1/` subfolder with the four release voices re-baked against the
+  new checkpoint. The Python engine and streaming server prefill from codec
+  codes and are unaffected; the `cpu/` C engine and the MLX/iOS prebake read
+  the baked `cond_bias` / `spk_token_emb` pair and should use the matching
+  folder. New `scripts/build_prompts.py` regenerates a prompt folder for any
+  checkpoint from the shipped `.wav` + `.txt`.
+- `cpu/export_full.py` derives the SQ fallback width from the checkpoint
+  (`sq_input_dim`) instead of assuming the 6-channel `vui-nano` layout.
+
 ### Fixed
 
+- **`cpu/prepare_prompt.py` and `cpu/prepare_prompt_official.py` crashed with
+  `'Decoder' object has no attribute 'allocate_inference_cache'`** — the
+  allocator for the plain KV-cache path was removed with the legacy CUDA-graph
+  code in 1.0.0 while the path itself stayed. Restored on `Decoder`; the C
+  engine's voice KV caches bake again.
 - **ARM64 Linux: `ModuleNotFoundError: No module named 'flash_attn'`.** Only an
   x86_64 wheel was pinned, so the TTS worker crashed on the first decode step on
   ARM hosts. Two changes:

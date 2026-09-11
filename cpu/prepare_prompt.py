@@ -156,5 +156,5 @@ if __name__ == "__main__":
     if len(sys.argv) < 3:
         print(f"Usage: {sys.argv[0]} <prompt.wav> <output_cache.bin> [checkpoint]")
         sys.exit(1)
-    ckpt = sys.argv[3] if len(sys.argv) > 3 else "checkpoints/0jiksor5_0100000.pt"
+    ckpt = sys.argv[3] if len(sys.argv) > 3 else "vui-nano-1.1.safetensors"
     prepare_prompt(sys.argv[1], sys.argv[2], ckpt)

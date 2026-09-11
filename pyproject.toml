@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vui"
-version = "1.0.0"
+version = "1.1.0"
 description = "Vui: streaming conversational TTS server with WebRTC, ASR, and LLM integration"
 
 requires-python = ">=3.12,<3.13"

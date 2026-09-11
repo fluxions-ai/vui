@@ -25,8 +25,9 @@ def reject_legacy_checkpoint(state_dict: dict, source: str = "checkpoint"):
             "(per-quantizer audio_embeddings/audio_heads, no rq_transformer) "
             "and does not match the current architecture. Load it with "
             "vui.legacy instead (`from vui.legacy import Vui, render`), or "
-            "use a current checkpoint: 'vui-190k.safetensors' (default) or "
-            "'vui-nano.safetensors' from https://huggingface.co/fluxions/vui."
+            "use a current checkpoint: 'vui-nano-1.1.safetensors' (default), "
+            "'vui-190k.safetensors' or 'vui-nano.safetensors' from "
+            "https://huggingface.co/fluxions/vui."
         )
 
 
@@ -511,6 +512,24 @@ class Decoder(nn.Module):
         shared_seq_lens = self.flash_kv_caches[0].seq_lens
         for kv in self.flash_kv_caches[1:]:
             kv.seq_lens = shared_seq_lens
+
+    def allocate_inference_cache(
+        self, batch_size: int, device: str, dtype=torch.bfloat16
+    ):
+        """Static per-block KV cache for the plain (non-flash) `forward` path.
+
+        Used by the `cpu/` tooling to prefill a voice prompt on CPU and dump the
+        cache for the C engine; the CUDA engine uses `allocate_flash_kv_cache`.
+        """
+        for block in self.blocks:
+            block.attn.kv_cache = KVCache(
+                batch_size, self.max_seqlen, block.n_kv_heads, block.head_dim, dtype
+            ).to(device)
+        self.attn_mask = torch.tril(
+            torch.ones(
+                self.max_seqlen, self.max_seqlen, dtype=torch.bool, device=device
+            )
+        )
 
     def deallocate_kv_cache(self):
         for block in self.blocks:

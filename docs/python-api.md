@@ -19,7 +19,7 @@ from vui.qwen_codec import SAMPLE_RATE as SR  # 24 kHz
 from vui.qwen_codec import QwenCodecEncoder
 from vui.inference import asr
 
-engine = Engine()  # name="vui-190k" by default; pass a name or local path to override
+engine = Engine()  # name="vui-nano-1.1" by default; pass a name or local path to override
 
 # The codec encoder is a torch model on every backend — CPU is fine (it runs
 # once per reference), and Engine() itself uses MLX on Apple Silicon.
@@ -227,7 +227,7 @@ The `ctx=6` parameter prepends 6 frames (~500ms) of codec context to smooth chun
 
 ## Apple Silicon (MLX)
 
-**Status:** TTS inference on MLX is working — quantized vui-190k renders voice-prompted speech end-to-end at ~1.5× real-time on M4, and `load_quantized` auto-downloads the pre-baked int8/int4 weights (no torch float32-load-and-quantize step; torch is still used to encode prompt audio). The wider MLX stack (ASR, streaming-server integration) is still WIP.
+**Status:** TTS inference on MLX is working — quantized vui-nano-1.1 renders voice-prompted speech end-to-end at ~1.5× real-time on M4, and `load_quantized` auto-downloads the pre-baked int8/int4 weights (no torch float32-load-and-quantize step; torch is still used to encode prompt audio). The wider MLX stack (ASR, streaming-server integration) is still WIP.
 
 **`Engine()` works here.** On a machine without CUDA, `Engine()` returns `vui.mlx.engine.MLXEngine`, which implements the same Row API (`prefill` / `add_user` / `render` / `stream` / `rewind` / `reset`) backed by MLX — so the minimal example above runs unchanged. What differs from the CUDA engine:
 

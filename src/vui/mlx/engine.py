@@ -27,24 +27,30 @@ from vui.mlx.tts.weights import load_quantized
 
 
 def load_official_prompt(
-    voice: str, prompt_dir: str | None = None
+    voice: str,
+    prompt_dir: str | None = None,
+    checkpoint: str | None = None,
 ) -> tuple[str, mx.array, mx.array, mx.array | None]:
     """Returns (transcript, codes (T,Q) int32, spk_token (1,1,d), cond_bias|None).
 
-    `prompt_dir` reads local <voice>.safetensors/.txt; default downloads the
-    pre-baked set from the HF repo (codes + pre-projected speaker token +
-    cond_bias, so no torch codec encoder is needed for the official voices).
+    `prompt_dir` reads a local <voice>.safetensors; by default the pre-baked
+    set is downloaded from the HF repo — from the folder baked for `checkpoint`
+    (`vui.prompt_files.prompt_folder`), since `spk_token_emb` / `cond_bias`
+    are checkpoint-specific. The transcript comes from the safetensors
+    metadata (legacy files: sibling `.txt`). No torch codec encoder is needed
+    for the official voices.
     """
-    if prompt_dir:
-        st = mx.load(f"{prompt_dir}/{voice}.safetensors")
-        txt_path = f"{prompt_dir}/{voice}.txt"
-    else:
-        from huggingface_hub import hf_hub_download
+    from vui.prompt_files import hub_prompt, hub_prompt_transcript, prompt_transcript
 
-        st = mx.load(hf_hub_download("fluxions/vui", f"prompts/{voice}.safetensors"))
-        txt_path = hf_hub_download("fluxions/vui", f"prompts/{voice}.txt")
-    with open(txt_path) as f:
-        text = f.read().strip()
+    if prompt_dir:
+        st_path = f"{prompt_dir}/{voice}.safetensors"
+        text = prompt_transcript(st_path)
+        if not text:
+            raise FileNotFoundError(f"no transcript for {st_path} (metadata or sibling .txt)")
+    else:
+        st_path = hub_prompt(voice, checkpoint)
+        text = hub_prompt_transcript(voice, st_path)
+    st = mx.load(st_path)
     codes = st["codes"].astype(mx.int32)  # (T, Q)
     spk_token = st["spk_token_emb"].astype(mx.float32)  # (1, 1, d) pre-projected
     cond_bias = st.get("cond_bias")
@@ -145,7 +151,7 @@ class MLXEngine:
 
     def __init__(
         self,
-        name: str = "vui-190k",
+        name: str = "vui-nano-1.1",
         *,
         model=None,
         codec=None,
