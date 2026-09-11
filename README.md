@@ -290,7 +290,7 @@ A small autoregressive LM over the Qwen3-TTS speech codec — **219M active para
 - **218,623,489 active parameters** of 305,356,033 total (71.6%) — the remaining 86,732,544 are embedding lookup tables that cost zero FLOPs. Llama-style decoder + RQ-Transformer head — 768 dim, 22 layers, 8 heads
 - **Codec**: [Qwen3-TTS-Tokenizer-12Hz](https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz) — 16 codebooks of 2048 entries at 12.5 Hz, 24 kHz audio (decoded), pure-PyTorch reimplementation in `src/vui/qwen_codec.py`
 - **Speaker encoder**: ECAPA-TDNN from `Qwen3-TTS-12Hz-0.6B-Base` (8.9M params, 1024-dim) — used at training time to embed reference speakers
-- **Output**: 16 kHz audio, bf16 inference (611 MB on disk), ~9× realtime streaming on a 4090
+- **Output**: 24 kHz audio (`qwen_codec.SAMPLE_RATE`), bf16 inference (611 MB on disk), ~9× realtime streaming on a 4090
 - **Conversation context**: ~6 minutes (4500 frames at 12.5 Hz). A turn is written into the KV cache as `text [SC] codes` — the user's words *and* their audio — so generation is conditioned on the dialogue so far, not just the sentence being spoken (`Row.add_user`, `src/vui/engine.py`)
 - **Trained on dialogue**: two-speaker alternating turns with an explicit `[SC]` speaker-change token, plus 21 paralinguistic tokens — `[breath]`, `[laugh]`, `[hesitate]`, `[sigh]`, `[overlap]`, `[tut]`, `[mouthnoise]` … (`src/vui/tokenizer.py`)
 - **License**: Apache 2.0, weights included — commercial use permitted
@@ -389,27 +389,7 @@ AudioEncoder(audio.squeeze().cpu().float().unsqueeze(0), sample_rate=SR).to_file
 
 `row.rewind()` returns the KV cache to end-of-prompt, so you can render many lines in the same voice without re-encoding the reference.
 
-**References longer than ~15s must be chunked.** A single 60-second segment destroys the model's per-segment speaker prefix and the output drifts off-speaker. `build_prompt_segments` does the ASR, forced alignment, and sentence-boundary splitting for you:
-
-```python
-from vui.prompt_utils import build_prompt_segments
-
-segments = build_prompt_segments(
-    wav_16k,
-    encode_codes=lambda a: codec_enc.encode(
-        resample_frac(a.unsqueeze(0), 16000, SR).float().to(dev).unsqueeze(0)
-    )[0, : engine.Q].T.long(),
-    transcribe=asr,       # any (audio_16k) -> str works
-    align_device=dev,
-    target_seg=10.0,      # sweet spot for the released checkpoint
-)
-
-with engine.new_row() as row:
-    row.prefill([Segment(t, c) for t, c in segments])
-    _, audio = row.render("Your text here.", GenConfig(temperature=0.7))
-```
-
-It's expensive (ASR + Wav2Vec2 alignment, several seconds), so pickle the segments and reuse them — see `_save_prompt_to_disk` in `demo.py`. Full guide, including streaming, continuous batching and the MLX path: [`docs/python-api.md`](docs/python-api.md).
+**References longer than ~15s must be chunked.** A single 60-second segment destroys the model's per-segment speaker prefix and the output drifts off-speaker — pass a `list[Segment]` instead. `vui.prompt_utils.build_prompt_segments` does the ASR, forced alignment, and sentence-boundary splitting at ~10s targets for you; [`docs/python-api.md`](docs/python-api.md) has the worked example, plus streaming, continuous batching, codes-only decode, and the MLX path.
 
 #### Clone a voice on CPU
 
@@ -427,25 +407,9 @@ OMP_NUM_THREADS=4 ./vui_tts vui_full.bin --kv-cache prompt_cache.bin \
 
 If you need a checkpoint tuned to a specific voice for a legitimate use case (audiobooks, accessibility, game characters, dubbing of consenting performers, internal tooling), **get in touch** via [fluxions.ai](https://fluxions.ai) — we can train, license, or host one for you.
 
-```python
-# On NVIDIA this is the CUDA-graph engine (continuous batching, streaming);
-# on Apple Silicon Engine() auto-dispatches to a single-row MLX backend with
-# the same Row API (prefill / render / stream / rewind).
-from vui.engine import Engine, GenConfig
-
-engine = Engine()  # loads "vui-190k.safetensors" from HuggingFace by default
-with engine.new_row() as row:
-    codes, audio = row.render(
-        "So [breath] the thing about this is, it's not what you'd expect, right?",
-        GenConfig(temperature=0.7),
-    )
-```
-
 **Original-release (pre-1.0) checkpoints** — `vui-100m-base.pt`, `vui-cohost-100m.pt`, `vui-abraham-100m.pt` — use an older architecture and don't load into `Engine`. They still work via `vui.legacy`: `from vui.legacy import Vui, render; audio = render(Vui.from_pretrained("vui-cohost-100m.pt").eval(), "Hello!")` (22 kHz output, faster than real-time on CPU — no GPU or flash-attn needed). On Apple Silicon, `vui.mlx.legacy.load_legacy_mlx` runs the transformer on MLX at ~4.5× real-time. Details: [`docs/legacy.md`](docs/legacy.md).
 
 **Tip: try turning repetition penalty off.** `GenConfig` defaults `rep_penalty=1.1` to break long silence/filler loops, but it can flatten prosody and distort natural repetition. Setting it to `0` (anything `<= 1.0` disables the penalty path, see `inference.py:539`) often gives more natural-sounding output — worth trying if generations sound stilted or over-corrected.
-
-For long voice prompts (>15s) you need proper multi-segment chunking — `vui.prompt_utils.build_prompt_segments` does ASR + forced alignment + sentence-boundary splits at ~10s targets so the model keeps its speaker conditioning across the full reference. Full Python guide covering chunked prompts, streaming, continuous batching, codes-only decode, and the MLX path: [`docs/python-api.md`](docs/python-api.md).
 
 ## Hardware
 

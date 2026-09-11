@@ -21,13 +21,17 @@ from vui.inference import asr
 
 engine = Engine()  # name="vui-190k" by default; pass a name or local path to override
 
+# The codec encoder is a torch model on every backend — CPU is fine (it runs
+# once per reference), and Engine() itself uses MLX on Apple Silicon.
+dev = "cuda" if torch.cuda.is_available() else "cpu"
+
 # Encode the voice prompt (audio + transcript -> Segment)
 wav_16k = AudioDecoder("prompts/abraham.wav", sample_rate=16000, num_channels=1) \
     .get_all_samples().data.squeeze(0)
 wav_24k = resample_frac(wav_16k.unsqueeze(0), 16000, SR)
-codec_enc = QwenCodecEncoder.from_pretrained().cuda().float().eval()
+codec_enc = QwenCodecEncoder.from_pretrained().to(dev).float().eval()
 with torch.inference_mode():
-    codes = codec_enc.encode(wav_24k.float().cuda().unsqueeze(0))
+    codes = codec_enc.encode(wav_24k.float().to(dev).unsqueeze(0))
 prompt_codes = codes[0, : engine.Q].T.long()  # (T, Q)
 prompt_text = asr(wav_16k)                    # ASR transcript
 
@@ -64,7 +68,8 @@ from vui.qwen_codec import SAMPLE_RATE as SR
 from vui.qwen_codec import QwenCodecEncoder
 
 engine = Engine()
-codec_enc = QwenCodecEncoder.from_pretrained().cuda().float().eval()
+dev = "cuda" if torch.cuda.is_available() else "cpu"
+codec_enc = QwenCodecEncoder.from_pretrained().to(dev).float().eval()
 
 # 90s voice prompt -> chunked segments
 wav_16k = AudioDecoder("prompts/long_speaker.wav", sample_rate=16000, num_channels=1) \
@@ -75,7 +80,7 @@ def _encode(audio_16k):
     from julius.resample import resample_frac
     audio_24k = resample_frac(audio_16k.unsqueeze(0), 16000, SR)
     with torch.inference_mode():
-        codes = codec_enc.encode(audio_24k.float().cuda().unsqueeze(0))
+        codes = codec_enc.encode(audio_24k.float().to(dev).unsqueeze(0))
     return codes[0, : engine.Q].T.long()
 
 # build_prompt_segments -> [(text, codes), (text, codes), ...]
@@ -83,7 +88,7 @@ segments = build_prompt_segments(
     wav_16k,
     encode_codes=_encode,
     transcribe=asr,           # any (audio_16k) -> str works (whisper, moonshine, custom)
-    align_device="cuda",       # Wav2Vec2 alignment device
+    align_device=dev,         # Wav2Vec2 alignment device
     target_seg=10.0,          # target segment length in seconds
 )
 print(f"{len(segments)} segments, "
@@ -201,10 +206,11 @@ To decode codec codes back to audio later (anywhere with a `QwenCodecDecoder` av
 
 ```python
 from vui.qwen_codec import QwenCodecDecoder
-codec_dec = QwenCodecDecoder.from_pretrained().cuda().float().eval()
+dev = "cuda" if torch.cuda.is_available() else "cpu"
+codec_dec = QwenCodecDecoder.from_pretrained().to(dev).float().eval()
 
 # codes: (T, Q) long. Shape it back to (1, Q, T) for the decoder.
-c = codes.T.unsqueeze(0).cuda()
+c = codes.T.unsqueeze(0).to(dev)
 with torch.inference_mode():
     audio = codec_dec.decode_chunked(c, ctx=6)  # (1, 1, S)
 ```
