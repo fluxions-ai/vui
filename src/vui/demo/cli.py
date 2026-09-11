@@ -139,7 +139,7 @@ def _mlx_prompt(engine, row, prompt_file: str) -> bool:
     voice = Path(prompt_file).stem
     try:
         text, codes, spk_token, cond_bias = load_official_prompt(
-            voice, checkpoint=getattr(engine, "_loaded_ckpt", None)
+            voice, checkpoint=getattr(engine, "checkpoint", None)
         )
         if cond_bias is not None:
             engine.cond_bias = cond_bias

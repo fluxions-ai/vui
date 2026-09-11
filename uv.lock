@@ -2043,27 +2043,16 @@ wheels = [
 ]
 
 [[package]]
-name = "vui"
+name = "vui-tts"
 version = "1.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "aiohttp" },
-    { name = "aiortc" },
-    { name = "av" },
-    { name = "claude-agent-sdk" },
     { name = "einops" },
-    { name = "faster-whisper" },
-    { name = "filelock" },
-    { name = "gradio" },
     { name = "httpx" },
     { name = "huggingface-hub" },
     { name = "julius" },
     { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "mlx-whisper", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "numpy" },
-    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux'" },
-    { name = "onnxruntime" },
-    { name = "openai-whisper" },
     { name = "pydantic" },
     { name = "safetensors" },
     { name = "soundfile" },
@@ -2087,37 +2076,51 @@ mlx = [
 moonshine = [
     { name = "moonshine-voice" },
 ]
+server = [
+    { name = "aiohttp" },
+    { name = "aiortc" },
+    { name = "av" },
+    { name = "claude-agent-sdk" },
+    { name = "faster-whisper" },
+    { name = "filelock" },
+    { name = "gradio" },
+    { name = "mlx-whisper", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
+    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux'" },
+    { name = "onnxruntime" },
+    { name = "openai-whisper" },
+]
 
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "vui-tts", extra = ["server"] },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "aiohttp", specifier = ">=3.10" },
-    { name = "aiortc", specifier = ">=1.9" },
-    { name = "av", specifier = ">=12" },
-    { name = "claude-agent-sdk", specifier = ">=0.1.70" },
+    { name = "aiohttp", marker = "extra == 'server'", specifier = ">=3.10" },
+    { name = "aiortc", marker = "extra == 'server'", specifier = ">=1.9" },
+    { name = "av", marker = "extra == 'server'", specifier = ">=12" },
+    { name = "claude-agent-sdk", marker = "extra == 'server'", specifier = ">=0.1.70" },
     { name = "einops", specifier = ">=0.8" },
-    { name = "faster-whisper", specifier = ">=1.0" },
-    { name = "filelock", specifier = ">=3.16" },
+    { name = "faster-whisper", marker = "extra == 'server'", specifier = ">=1.0" },
+    { name = "filelock", marker = "extra == 'server'", specifier = ">=3.16" },
     { name = "flash-attn", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'flash'", url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.22/flash_attn-2.8.3%2Bcu130torch2.11-cp312-cp312-linux_aarch64.whl" },
     { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'flash'", url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.12/flash_attn-2.7.4%2Bcu130torch2.10-cp312-cp312-linux_x86_64.whl" },
-    { name = "gradio", specifier = ">=5.0" },
+    { name = "gradio", marker = "extra == 'server'", specifier = ">=5.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "huggingface-hub", specifier = ">=0.26" },
     { name = "julius", specifier = ">=0.2" },
     { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.18" },
     { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'mlx'", specifier = ">=0.18" },
-    { name = "mlx-whisper", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.4" },
     { name = "mlx-whisper", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'mlx'", specifier = ">=0.4" },
+    { name = "mlx-whisper", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'server'", specifier = ">=0.4" },
     { name = "moonshine-voice", marker = "extra == 'moonshine'" },
     { name = "numpy", specifier = ">=1.24" },
-    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux'" },
-    { name = "onnxruntime", specifier = ">=1.19" },
-    { name = "openai-whisper" },
+    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux' and extra == 'server'" },
+    { name = "onnxruntime", marker = "extra == 'server'", specifier = ">=1.19" },
+    { name = "openai-whisper", marker = "extra == 'server'" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "safetensors", specifier = ">=0.4" },
     { name = "soundfile", specifier = ">=0.12" },
@@ -2128,12 +2131,13 @@ requires-dist = [
     { name = "torchcodec", specifier = "==0.11.*" },
     { name = "transformers", specifier = ">=4.45" },
 ]
-provides-extras = ["flash", "mlx", "moonshine"]
+provides-extras = ["server", "flash", "mlx", "moonshine"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "vui-tts", extras = ["server"] },
 ]
 
 [[package]]

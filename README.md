@@ -72,6 +72,24 @@ Clones into `~/vui`, auto-detects Docker vs. native, installs deps (uv, ffmpeg l
 
 Flags (`--docker`, `--native`, `--llm <backend>`, `--no-claude`, `--no-launch`, `--upgrade`, `--model <name>`, `--dry-run`) forward to `install.sh` — see `./install.sh --help` from the clone for the full list. Note `--model` selects the **Ollama LLM** (default `qwen3.5:4b`), not the TTS checkpoint; to change that, pass a name or path to `Engine()`.
 
+### Just the model: `pip install vui-tts`
+
+If you only want Vui Nano in your own Python — a Pipecat or LiveKit agent, a batch job, a notebook — the engine is on PyPI as [`vui-tts`](https://pypi.org/project/vui-tts/) (the import name is `vui`; the bare `vui` name on PyPI is an unrelated package):
+
+```sh
+pip install vui-tts              # engine only: CUDA, or MLX on Apple Silicon
+pip install "vui-tts[server]"    # + the streaming voice assistant (WebRTC, ASR, demo UI, task server)
+```
+
+```python
+from vui.engine import Engine, GenConfig
+engine = Engine()                # vui-nano-1.1 downloads from Hugging Face on first use
+with engine.new_row() as row:
+    codes, audio = row.render("Hello from Vui.", GenConfig(temperature=0.7))
+```
+
+Voice cloning and streaming from Python are covered in [`docs/python-api.md`](docs/python-api.md). Python 3.12; FlashAttention-2 is the optional `flash` extra (see [Hardware](#hardware)).
+
 ## Quick start (docker-compose, recommended)
 
 The Vui streaming server runs from one compose file. The recommended setup is **Ollama on the host** (most users already have it) plus the Vui container — the container uses host networking and talks to your local Ollama at `localhost:11434`. Designed for **Linux + NVIDIA GPU**.

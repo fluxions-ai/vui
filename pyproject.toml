@@ -3,14 +3,30 @@ requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vui"
+# Distribution name on PyPI is `vui-tts` (`vui` is taken by an unrelated GUI
+# toolkit); the import name stays `vui`. `pip install vui-tts` gives the
+# inference engine only — `vui.engine.Engine`, the codec, prompts, MLX on
+# Apple Silicon — which is what integrations (Pipecat, LiveKit) depend on.
+# The voice-assistant server is the `server` extra.
+name = "vui-tts"
 version = "1.1.0"
-description = "Vui: streaming conversational TTS server with WebRTC, ASR, and LLM integration"
+description = "Vui Nano — a small, context-aware text-to-speech model trained on real conversations. 219M active params (305M total), Apache 2.0, voice cloning, streaming, runs on CPU. Ships with a full real-time voice assistant (WebRTC, ASR, local LLM, OpenAI Realtime API compatible)."
+readme = "README.md"
+license = "Apache-2.0"
+authors = [{ name = "Fluxions AI", email = "hello@fluxions.ai" }]
+keywords = ["tts", "text-to-speech", "speech-synthesis", "voice-cloning", "streaming", "conversational-ai", "mlx", "on-device"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 
 requires-python = ">=3.12,<3.13"
 
+# Inference only: what `from vui.engine import Engine` needs on CUDA, MLX and CPU.
 dependencies = [
-    # Model & inference
     "torch==2.11.*",
     "torchaudio==2.11.*",
     "torchcodec==0.11.*",
@@ -22,41 +38,46 @@ dependencies = [
     "pydantic>=2.9",
     "numpy>=1.24",
     "soundfile>=0.12",
-    "openai-whisper",
     "julius>=0.2",
-    # Streaming server
+    "httpx>=0.27",
+    "tiktoken>=0.8",     # tokenizer.py's tiktoken mode (checkpoint-dependent)
+    # NOTE: flash-attn is deliberately NOT here — see the `flash` extra below.
+    # MLX backend — automatic on Apple Silicon so Engine()'s auto-dispatch
+    # works out of the box (same marker mechanism as flash-attn below).
+    "mlx>=0.18 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
+[dependency-groups]
+# `uv sync` installs these by default; `--no-dev` skips them. The dev group
+# pulls the `server` extra so a checkout has the whole assistant, while
+# `pip install vui-tts` stays inference-only.
+dev = [
+    "pytest",
+    "pytest-asyncio",   # the backend/route tests are async
+    "vui-tts[server]",
+]
+
+[project.optional-dependencies]
+# The real-time voice assistant: WebRTC streaming server, ASR, demo UI, task
+# server. `uv sync --extra server` / `pip install "vui-tts[server]"`.
+server = [
+    "openai-whisper",
     "aiohttp>=3.10",
     "aiortc>=1.9",
     "av>=12",            # WebRTC AudioFrame / AudioResampler — aiortc's wire type
     "filelock>=3.16",
-    "httpx>=0.27",
     # ASR (faster-whisper default; silero VAD ONNX bundled in serving/stream/)
     "faster-whisper>=1.0",
     "onnxruntime>=1.19",
     # Demo UI
     "gradio>=5.0",
-    "tiktoken>=0.8",
-    # Claude task delegation server (always installed — `claude_server.py`
-    # imports it at module load).
+    # Claude task delegation server (`claude_server.py` imports it at module load).
     "claude-agent-sdk>=0.1.70",
-    # NOTE: flash-attn is deliberately NOT here — see the `flash` extra below.
     # ctranslate2 (faster-whisper) dlopens libcublas.so.12 at import time;
     # torch brings cu13. This supplies the cu12 ABI ctranslate2 needs.
     "nvidia-cublas-cu12 ; sys_platform == 'linux'",
-    # MLX backend — automatic on Apple Silicon so Engine()'s auto-dispatch
-    # works out of the box (same marker mechanism as flash-attn above).
-    "mlx>=0.18 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx-whisper>=0.4 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
-
-[dependency-groups]
-# `uv sync` installs these by default; `--no-dev` skips them.
-dev = [
-    "pytest",
-    "pytest-asyncio",   # the backend/route tests are async
-]
-
-[project.optional-dependencies]
 # FlashAttention-2. Optional because the pinned wheels carry cubins for
 # sm_80/90/100/120 and no PTX, so on anything older (Turing sm_75, Volta
 # sm_70) importing it succeeds and the first decode step dies with "no kernel

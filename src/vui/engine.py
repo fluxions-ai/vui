@@ -706,6 +706,13 @@ class Engine:
     # Row lifecycle
     # ------------------------------------------------------------------
 
+    @property
+    def checkpoint(self) -> str | None:
+        """The checkpoint this engine loaded (Hub filename or local path); None
+        when a model was injected. Keys checkpoint-specific assets such as
+        the voice-prompt folder (`vui.prompt_files.prompt_folder`)."""
+        return self._loaded_ckpt
+
     def new_row(self) -> Row:
         """Claim a free conversation slot."""
         if not self._free:

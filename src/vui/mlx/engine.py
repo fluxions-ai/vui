@@ -173,6 +173,7 @@ class MLXEngine:
         from vui.engine import Engine as _CudaEngine
 
         path = _CudaEngine.NAMES.get(name, name)
+        self._loaded_ckpt = path if model is None else None
         precision = precision or os.environ.get("VUI_MLX_PRECISION", "int8")
         print(f"[Engine-MLX] Loading model {path} ({precision}) ...")
         self.model, self.config = load_quantized(path, precision)
@@ -207,6 +208,11 @@ class MLXEngine:
         )
 
     # -- rows ---------------------------------------------------------------
+
+    @property
+    def checkpoint(self) -> str | None:
+        """The checkpoint this engine loaded — see `Engine.checkpoint`."""
+        return self._loaded_ckpt
 
     def new_row(self) -> MLXRow:
         if self._row is not None and not self._row._closed:
