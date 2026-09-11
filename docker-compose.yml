@@ -71,11 +71,9 @@ services:
       # and are visible to vui-stream's /tools/reload.
       - ./src/vui/serving/stream/tools:/app/src/vui/serving/stream/tools
     environment:
-      # `OLLAMA_URL` is read by llm.py (model-list / pull / MLX detect helpers);
-      # `VUI_OLLAMA_URL` is read by llm_backend.py (the chat/streaming path).
-      # Both must be set — they're separate code paths.
       # localhost works for both the host Ollama and the optional bundled one
-      # (which publishes :11434 on the host).
+      # (which publishes :11434 on the host). `OLLAMA_URL` is kept as the
+      # fallback name the MLX auto-setup helper still reads directly.
       OLLAMA_URL: "http://localhost:11434"
       VUI_OLLAMA_URL: "http://localhost:11434"
       VUI_OLLAMA_MODEL: "qwen3.5:4b"

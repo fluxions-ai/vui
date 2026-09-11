@@ -12,6 +12,7 @@ import time
 import traceback
 from pathlib import Path
 
+import vui  # noqa: F401  — must precede torchcodec: preloads the libs it dlopens
 import torch
 from torchcodec.decoders import AudioDecoder
 from torchcodec.encoders import AudioEncoder

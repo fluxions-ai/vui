@@ -1,113 +1,126 @@
-"""Ollama + ASR model HTTP routes."""
+"""LLM + ASR model HTTP routes.
+
+Everything here goes through the LLMBackend abstraction rather than raw Ollama
+endpoints, so the routes behave sensibly under vLLM (and any other
+OpenAI-compatible server) instead of returning empty lists and 500s.
+"""
 
 from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING
 
-import httpx
 from aiohttp import web
 
 from vui.serving.stream.asr_worker import ASR_MODELS
-from vui.serving.stream.llm import OLLAMA_URL, llm_prefill_system
+from vui.serving.stream.llm import llm_prefill_system
+from vui.serving.stream.llm_backend import get_backend
 
 if TYPE_CHECKING:
     from vui.serving.stream.server import StreamServer
 
 
-async def handle_ollama_models(srv: StreamServer, request):
+async def handle_llm_models(srv: StreamServer, request):
+    backend = get_backend()
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{OLLAMA_URL}/api/tags")
-            models = [m["name"] for m in resp.json().get("models", [])]
+        models = await backend.list_models()
     except Exception:
-        models = []
-    return web.json_response({"models": models, "current": srv.ollama_model})
+        models = [backend.model]
+    return web.json_response(
+        {
+            "models": models,
+            "current": srv.llm_model,
+            "backend": backend.name,
+            "can_switch": backend.supports_model_switch,
+            "can_pull": backend.supports_pull,
+        }
+    )
 
 
-async def handle_ollama_set_model(srv: StreamServer, request):
+async def handle_llm_set_model(srv: StreamServer, request):
+    backend = get_backend()
+    if not backend.supports_model_switch:
+        return web.json_response(
+            {"ok": False, "error": f"{backend.name} cannot switch models at runtime"},
+            status=409,
+        )
     data = await request.json()
     model = data.get("model", "").strip()
     if not model:
         return web.json_response({"ok": False, "error": "Model required"}, status=400)
-    prev = srv.ollama_model
-    await srv._block_ready("ollama")
+    prev = backend.model
+    await srv._block_ready("llm")
     try:
-        if prev != model:
-            try:
-                async with httpx.AsyncClient(timeout=10) as client:
-                    await client.post(
-                        f"{OLLAMA_URL}/api/generate",
-                        json={"model": prev, "keep_alive": 0},
-                    )
-            except Exception:
-                pass
-        srv.ollama_model = model
+        # This is the call the old route was missing: it only ever moved a
+        # label, so the switch appeared to work while the old model kept
+        # answering.
+        await backend.set_model(model)
         await srv._log(f"LLM model set to: {model}")
         try:
-            await llm_prefill_system(srv.session.soul, srv.ollama_model)
+            await llm_prefill_system(srv.session.soul)
         except Exception as e:
-            srv.ollama_model = prev
+            await backend.set_model(prev)
             await srv._log(f"Model failed to load, reverting to {prev}: {e}", "error")
             return web.json_response(
                 {"ok": False, "error": f"Model failed to load: {e}"}
             )
         return web.json_response({"ok": True, "model": model})
+    except ValueError as e:
+        # e.g. VLLMBackend rejecting a model it doesn't serve.
+        return web.json_response({"ok": False, "error": str(e)}, status=400)
     finally:
-        await srv._unblock_ready("ollama")
+        await srv._unblock_ready("llm")
 
 
-async def handle_ollama_pull(srv: StreamServer, request):
+async def handle_llm_pull(srv: StreamServer, request):
+    backend = get_backend()
+    if not backend.supports_pull:
+        # 409, not 500 — an expected capability gap, not a server fault.
+        return web.json_response(
+            {
+                "ok": False,
+                "error": f"{backend.name} has no model registry to pull from",
+            },
+            status=409,
+        )
     data = await request.json()
     model = data.get("model", "").strip()
     if not model:
         return web.json_response({"ok": False, "error": "Model required"}, status=400)
-    await srv._block_ready("ollama")
+    await srv._block_ready("llm")
     try:
         await srv._log(f"Pulling model: {model}...")
         ws = srv.session.ws
-        async with httpx.AsyncClient(timeout=600) as client:
-            async with client.stream(
-                "POST",
-                f"{OLLAMA_URL}/api/pull",
-                json={"name": model, "stream": True},
-            ) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if not line:
-                        continue
-                    import json
-
-                    msg = json.loads(line)
-                    status = msg.get("status", "")
-                    total = msg.get("total", 0)
-                    completed = msg.get("completed", 0)
-                    pct = int(completed / total * 100) if total > 0 else 0
-                    text = f"{status} {pct}%" if total > 0 else status
-                    if ws and not ws.closed:
-                        try:
-                            await ws.send_json(
-                                {
-                                    "type": "pull_progress",
-                                    "text": text,
-                                    "pct": pct,
-                                    "status": status,
-                                }
-                            )
-                        except Exception:
-                            pass
+        async for msg in backend.pull(model):
+            status = msg.get("status", "")
+            total = msg.get("total", 0)
+            completed = msg.get("completed", 0)
+            pct = int(completed / total * 100) if total > 0 else 0
+            text = f"{status} {pct}%" if total > 0 else status
+            if ws and not ws.closed:
+                try:
+                    await ws.send_json(
+                        {
+                            "type": "pull_progress",
+                            "text": text,
+                            "pct": pct,
+                            "status": status,
+                        }
+                    )
+                except Exception:
+                    pass
         await srv._log(f"Model pulled: {model}")
-        srv.ollama_model = model
+        await backend.set_model(model)
         try:
-            await llm_prefill_system(srv.session.soul, srv.ollama_model)
+            await llm_prefill_system(srv.session.soul)
         except Exception as e:
-            await srv._log(f"Ollama prefill failed: {e}", "warn")
+            await srv._log(f"LLM prefill failed: {e}", "warn")
         return web.json_response({"ok": True, "model": model})
     except Exception as e:
         await srv._log(f"Pull failed: {e}", "error")
         return web.json_response({"ok": False, "error": str(e)}, status=500)
     finally:
-        await srv._unblock_ready("ollama")
+        await srv._unblock_ready("llm")
 
 
 async def handle_asr_models(srv: StreamServer, request):
@@ -152,13 +165,11 @@ async def handle_asr_set_model(srv: StreamServer, request):
 
 
 def bind(cls):
-    cls.handle_ollama_models = lambda self, *a, **kw: handle_ollama_models(
+    cls.handle_llm_models = lambda self, *a, **kw: handle_llm_models(self, *a, **kw)
+    cls.handle_llm_set_model = lambda self, *a, **kw: handle_llm_set_model(
         self, *a, **kw
     )
-    cls.handle_ollama_set_model = lambda self, *a, **kw: handle_ollama_set_model(
-        self, *a, **kw
-    )
-    cls.handle_ollama_pull = lambda self, *a, **kw: handle_ollama_pull(self, *a, **kw)
+    cls.handle_llm_pull = lambda self, *a, **kw: handle_llm_pull(self, *a, **kw)
     cls.handle_asr_models = lambda self, *a, **kw: handle_asr_models(self, *a, **kw)
     cls.handle_asr_set_model = lambda self, *a, **kw: handle_asr_set_model(
         self, *a, **kw

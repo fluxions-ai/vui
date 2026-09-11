@@ -82,9 +82,9 @@ Dropdown of every ASR backend the server can load (see [supported ASR models](#a
 
 ### LLM Model
 
-Dropdown of models *currently loaded* on the Ollama server (`/api/ps`). Switch is live. The text input + **Pull** button calls `/api/pull` on the server to download a new model — progress streams to the line below.
+Dropdown of models the backend can switch to — on Ollama that's everything installed (`/api/tags`), on vLLM the ids the server advertises (`/v1/models`). Switch is live. The text input + **Pull** button downloads a new model; progress streams to the line below.
 
-> Note: this UI talks only to the Ollama backend. With `VUI_LLM_BACKEND=vllm`, the dropdown shows the served model and switching is disabled (vLLM serves one model per process).
+> The controls follow the backend's capabilities, reported by `GET /llm/models` as `can_switch` / `can_pull`. Under vLLM the **Pull** input and button are hidden — vLLM has no model registry — and since it serves one model per process the dropdown has a single entry. The active backend's name is shown next to the *LLM Model* label.
 
 ### Log
 
@@ -157,7 +157,7 @@ Two backends, selected by env var:
 | Backend | `VUI_LLM_BACKEND=` | Default URL | Default model | Notes |
 |---|---|---|---|---|
 | Ollama | `ollama` (default) | `http://localhost:11434` | `qwen3.5:4b` | Default, GGUF-quantized. UI dropdown can hot-swap and pull new models. On Apple Silicon, an MLX-quantized variant (`qwen3.5-4b-mlx`) is auto-created via `ollama create --experimental --quantize int4` for ~1.9× faster decode. |
-| vLLM (or any OpenAI-compatible server) | `vllm` | `http://localhost:8000` | `Qwen/Qwen3.5-4B` | Single model per process; UI dropdown is read-only. Sends Qwen-specific `chat_template_kwargs.enable_thinking=false` — set to `true` only if you want chain-of-thought (kills voice TTFB). |
+| vLLM (or any OpenAI-compatible server) | `vllm` | `http://localhost:8000` | `Qwen/Qwen3.5-4B` | Pip-installable, so it needs no root — the backend for a [rootless install](rootless-install.md). Single model per process, so the dropdown lists one id and **Pull** is hidden. Start it with `--enable-auto-tool-choice --tool-call-parser …` or tool calls silently degrade to plain text, and set `--gpu-memory-utilization` low enough to leave room for the TTS/ASR workers on the same card. Sends Qwen-specific `chat_template_kwargs.enable_thinking=false` — set to `true` only if you want chain-of-thought (kills voice TTFB). |
 
 The default sampling pinned in `llm_backend.py:DEFAULT_SAMPLING` (`temperature=1.0, top_k=20, top_p=0.95, presence_penalty=1.5`) mirrors the qwen3.5:4b Ollama Modelfile, so vLLM and Ollama produce comparable replies. Override per-call as needed.
 
@@ -208,21 +208,20 @@ The most common case: you've got an LLM running somewhere else (a remote vLLM bo
 Two env vars (the codebase has both — set them to the same URL):
 
 ```sh
-export OLLAMA_URL="http://gpu-box.lan:11434"
 export VUI_OLLAMA_URL="http://gpu-box.lan:11434"
 export VUI_OLLAMA_MODEL="qwen3:8b"
 
 python -m vui.serving.stream
 ```
 
-`OLLAMA_URL` is used by the model-listing / pull helpers (`llm.py`); `VUI_OLLAMA_URL` is used by the streaming/completion path (`llm_backend.py`). Setting only one will half-work — symptoms include the dropdown listing a different set of models than the one actually used for replies.
+One variable is enough. The model-list / switch / pull routes now go through the same backend object as the streaming path, so they can't disagree about which server they're talking to. Bare `OLLAMA_URL` is still read as a fallback when `VUI_OLLAMA_URL` is unset, so existing setups keep working.
 
 ### Pointing at vLLM (or any OpenAI-compatible server)
 
 ```sh
 export VUI_LLM_BACKEND=vllm
 export VUI_VLLM_URL="http://my-vllm-host:8000"
-export VUI_VLLM_MODEL="Qwen/Qwen3.5-4B"
+export VUI_VLLM_MODEL="google/gemma-4-E4B-it"
 
 python -m vui.serving.stream
 ```
@@ -241,8 +240,8 @@ Caveats:
 environment:
   VUI_LLM_BACKEND: "vllm"
   VUI_VLLM_URL: "http://my-vllm-host:8000"
-  VUI_VLLM_MODEL: "Qwen/Qwen3.5-4B"
-  # Drop OLLAMA_URL if the bundled ollama service isn't running.
+  VUI_VLLM_MODEL: "google/gemma-4-E4B-it"
+  # Drop OLLAMA_URL / VUI_OLLAMA_URL if the bundled ollama service isn't running.
 ```
 
 …and remove the `depends_on: [ollama]` if you're not running the bundled Ollama.
@@ -252,11 +251,14 @@ environment:
 | Var | Default | Purpose |
 |---|---|---|
 | `VUI_LLM_BACKEND` | `ollama` | Backend select: `ollama` or `vllm`. |
-| `VUI_OLLAMA_URL` | `http://localhost:11434` | Ollama base URL (used by the chat backend). |
-| `OLLAMA_URL` | `http://localhost:11434` | Ollama base URL (used by `/api/ps`, `/api/pull`, MLX detection). Set to the same value as `VUI_OLLAMA_URL`. |
+| `VUI_OLLAMA_URL` | `http://localhost:11434` | Ollama base URL. |
+| `OLLAMA_URL` | `http://localhost:11434` | Deprecated alias for `VUI_OLLAMA_URL`, still honoured as a fallback. Only the MLX auto-setup path reads it directly now. |
 | `VUI_OLLAMA_MODEL` | `qwen3.5:4b` | Initial Ollama model. UI can switch live. |
 | `VUI_VLLM_URL` | `http://localhost:8000` | vLLM (or OpenAI-compatible) base URL. |
-| `VUI_VLLM_MODEL` | `Qwen/Qwen3.5-4B` | Model id sent to vLLM. |
+| `VUI_VLLM_MODEL` | `google/gemma-4-E4B-it` | Model id sent to vLLM. |
+| `VUI_DTYPE` | auto | Force the model dtype: `bf16`, `fp16`, `fp32`. Auto-selects bf16 on compute 8.0+, fp16 below that, fp32 without CUDA. Use `fp32` if fp16's narrower exponent range produces NaNs. |
+| `VUI_ATTN` | auto | `torch` (or `sdpa`) forces the pure-PyTorch attention fallback instead of FlashAttention-2. Auto-selected anyway below compute 8.0. |
+| `UV_TORCH_BACKEND` | unset | Which CUDA build of torch `uv sync` installs (`auto`, `cu126`, `cu130`, `cpu`, …). `install.sh` sets it from the detected GPU. The default build covers sm_75+, so this only matters below Turing, which needs `cu126`. Requires a recent uv; older versions ignore it. |
 | `VUI_ASR` | `moonshine` | Initial ASR backend if no model key is requested: `moonshine`, `fwhisper`, `mlx_whisper`. |
 | `VUI_MOONSHINE_ARCH` | `4` | Moonshine variant: `0` tiny, `2` tiny-streaming, `4` small-streaming, `5` medium-streaming. |
 | `VUI_FWHISPER_MODEL` | `distil-small.en` | faster-whisper model id. |
