@@ -57,7 +57,7 @@ Want the TTS model on its own, without the assistant? See [Vui Nano](#vui-nano) 
 - **Built-in web search** — single-query factual lookups ("weather in London", "price of X", "who won the match") via Serper, Brave, or Tavily — one API round-trip, no agent loop; falls through to `delegate` for multi-step research
 - **Optional Claude task server** — sidecar agent that handles slow/agentic work (Gmail, Calendar, Drive, Slack, multi-step web research) via your existing Claude Code MCPs; auto-discovered on boot
 - **Non-Anthropic task backends** — point the task server at Ollama, z.ai, DeepSeek, vLLM, LM Studio, LiteLLM via the Anthropic-compatible `/v1/messages` envelope
-- **Apple Silicon support** — the `Engine` Python API auto-dispatches to an MLX backend (quantized vui-190k, pre-baked weights auto-download, ~1.5–2.7× real-time on M4), `demo.py` and `demo.py --render` work end-to-end; the streaming-server MLX glue is WIP
+- **Apple Silicon support** — the `Engine` Python API auto-dispatches to an MLX backend (quantized vui-nano-1.1, ~1.5–2.7× real-time on M4; pre-baked weights auto-download when published, otherwise converted once locally), `demo.py` and `demo.py --render` work end-to-end; the streaming-server MLX glue is WIP
 - **Mobile-ready** — documented cloudflared and Tailscale paths for phone access with mic over HTTPS
 - **Docker compose** — one file brings up the full stack (streaming server + optional bundled Ollama + optional Claude task server)
 - **OpenClaw integration** — point OpenClaw's `openai` realtime provider at Vui for a fully-local voice front-end
@@ -161,7 +161,7 @@ vLLM and other OpenAI-compatible backends are also supported (`VUI_LLM_BACKEND=v
 **Apple Silicon — MLX auto-setup (~1.9× faster decode, recommended):**
 On first run the server auto-creates `qwen3.5-4b-mlx` via `ollama create --experimental --quantize int4` (~37 tok/s decode vs ~19 tok/s for GGUF Q4 on the same 4B model). Falls back to `qwen3.5:4b` GGUF if MLX setup fails. `--experimental` is required — without it Ollama converts to GGUF and you lose the speedup.
 
-> **Apple Silicon status.** TTS on MLX **works**: `Engine()` auto-dispatches to a single-row MLX backend with the same Row API (prefill / render / stream / rewind), `python demo.py` and `demo.py --render` run end-to-end (int8 vui-190k, ~1.5–2.7× real-time on M4), and the pre-baked quantized weights auto-download on first run — no torch conversion step. Even the [pre-1.0 legacy checkpoints](docs/legacy.md) run with an MLX decoder. The **rest of the MLX stack is WIP**: MLX-Moonshine ASR, streaming-server glue, the `qwen3.5-4b-mlx` Ollama variant, and the docker-compose story haven't had the same polish as the CUDA path. If you're a Mac user who'd like to help shake out rough edges — kernel perf, streaming stability on M-series — we'd love contributors. Open an issue or PR on the repo, or get in touch via [fluxions.ai](https://fluxions.ai).
+> **Apple Silicon status.** TTS on MLX **works**: `Engine()` auto-dispatches to a single-row MLX backend with the same Row API (prefill / render / stream / rewind), `python demo.py` and `demo.py --render` run end-to-end (int8 vui-nano-1.1, ~1.5–2.7× real-time on M4), and the pre-baked quantized weights auto-download on first run — no torch conversion step. Even the [pre-1.0 legacy checkpoints](docs/legacy.md) run with an MLX decoder. The **rest of the MLX stack is WIP**: MLX-Moonshine ASR, streaming-server glue, the `qwen3.5-4b-mlx` Ollama variant, and the docker-compose story haven't had the same polish as the CUDA path. If you're a Mac user who'd like to help shake out rough edges — kernel perf, streaming stability on M-series — we'd love contributors. Open an issue or PR on the repo, or get in touch via [fluxions.ai](https://fluxions.ai).
 
 ### TTS demo on its own
 ```sh
@@ -294,6 +294,18 @@ A small autoregressive LM over the Qwen3-TTS speech codec — **219M active para
 - **Conversation context**: ~6 minutes (4500 frames at 12.5 Hz). A turn is written into the KV cache as `text [SC] codes` — the user's words *and* their audio — so generation is conditioned on the dialogue so far, not just the sentence being spoken (`Row.add_user`, `src/vui/engine.py`)
 - **Trained on dialogue**: two-speaker alternating turns with an explicit `[SC]` speaker-change token, plus 21 paralinguistic tokens — `[breath]`, `[laugh]`, `[hesitate]`, `[sigh]`, `[overlap]`, `[tut]`, `[mouthnoise]` … (`src/vui/tokenizer.py`)
 - **License**: Apache 2.0, weights included — commercial use permitted
+
+### Checkpoints
+
+All three share the architecture above and live in [`fluxions/vui`](https://huggingface.co/fluxions/vui). `Engine()`, `demo.py` and the streaming server default to **`vui-nano-1.1`**; pass a name from this table, a HF filename, or a local path to pick another.
+
+| Name | What it is | Paired eval (12 lines, `abraham` prompt, moonshine ASR, 4090) |
+|---|---|---|
+| **`vui-nano-1.1`** (default) | RL-tuned from `vui-190k` — the checkpoint that has served the production API since 2026-08-18. Same weights layout; 6-channel SQ conditioning (like `vui-nano`). Over 2400 production renders: catastrophic failures 1.54% → 0.71%, mean WER 5.2% → 3.0%. No babble gate needed. | **WER 2.9%**, 0 lines over 10%, 9.1× realtime |
+| `vui-190k` | Run `3hggswum` step 190k — the 1.0.x default and the base of 1.1. Adds the sq/wps conditioning knobs over `vui-nano`. `babble_probe-190k.pt` targets this checkpoint and is armed automatically when it is loaded. | WER 9.4%, 5 lines over 10%, 8.7× realtime |
+| `vui-nano` | The original 1.0 release checkpoint (6-dim SQ). Kept for reproducibility; the `cpu/` docs still reference it. | — |
+
+Voice prompts in `prompts/` carry codec codes (checkpoint-agnostic — the Python engine and the streaming server prefill from these) plus a baked `cond_bias` / `spk_token_emb` pair that **is** checkpoint-specific. Only the `cpu/` C engine and the MLX/iOS prebake read the baked pair, so those consumers should take their prompts from the matching folder: `prompts/vui-nano-1.1/` for 1.1, `prompts/` for `vui-nano`. `scripts/build_prompts.py` regenerates a folder for any checkpoint.
 
 ### Where the parameters go
 

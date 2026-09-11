@@ -53,7 +53,7 @@ class VuiConfig(BaseModel):
     has_wps_proj: bool = False
     has_spk_proj: bool = False
     # Number of speech-quality metrics fed to the SQ projector. Varies by
-    # checkpoint (vui-nano=6, vui-190k=7), so the model builds
+    # checkpoint (vui-nano=6, vui-190k=7, vui-nano-1.1=6), so the model builds
     # ScalarCondProjector(sq_input_dim) rather than hard-coding a width.
     sq_input_dim: int = 6
 

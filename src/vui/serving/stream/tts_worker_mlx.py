@@ -537,10 +537,12 @@ class MLXTTSEngine:
         audio_16k = resample_frac(dec.data, int(dec.sample_rate), 16000).squeeze(0)
         audio_24k = resample_frac(audio_16k.unsqueeze(0), 16000, 24000)
 
-        # Transcribe if no .txt
-        if txt_path.exists():
-            text = txt_path.read_text().strip()
-        else:
+        # Exact transcript from the sibling .safetensors metadata or .txt;
+        # transcribe only if neither exists.
+        from vui.prompt_files import prompt_transcript
+
+        text = prompt_transcript(wav_path)
+        if not text:
             import mlx_whisper
             text = mlx_whisper.transcribe(
                 audio_16k.numpy(),

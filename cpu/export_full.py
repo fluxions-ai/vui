@@ -89,10 +89,12 @@ def export(checkpoint_path: str, output_path: str):
             cond_bias = load_file(cond_src)["cond_bias"].float().reshape(-1)
             print(f"cond_bias: loaded from {cond_src} (norm {cond_bias.norm():.3f})")
         else:
-            cond_bias = m.sq_proj(
-                torch.tensor([[3.58, 3.95, 3.90, 4.25, 3.75, 4.03]])
-            ).reshape(-1)
-            print(f"cond_bias: computed from SQ_P90 (norm {cond_bias.norm():.3f})")
+            # P90 speech-quality scores; vui-nano and vui-nano-1.1 take 6, vui-190k
+            # takes 7 (the extra channel is left at 0).
+            n_sq = getattr(m.config.model, "sq_input_dim", 6)
+            sq_p90 = [3.58, 3.95, 3.90, 4.25, 3.75, 4.03, 0.0][:n_sq]
+            cond_bias = m.sq_proj(torch.tensor([sq_p90])).reshape(-1)
+            print(f"cond_bias: computed from SQ_P90[{n_sq}] (norm {cond_bias.norm():.3f})")
         eos_bias = m.eos_head.bias.item()
 
     sc_id = tokenizer.special_to_id["[SC]"]

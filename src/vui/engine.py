@@ -6,7 +6,7 @@ multi-conversation inference.
 
 Usage (streaming, B=1):
 
-    engine = Engine()  # loads "vui-190k" from HuggingFace by default
+    engine = Engine()  # loads "vui-nano-1.1" from HuggingFace by default
     with engine.new_row() as row:
         row.prefill([Segment(prompt_text, prompt_codes)], spk_emb=emb)
         for audio in row.stream("Hello!", GenConfig(temperature=0.9)):
@@ -283,7 +283,7 @@ class Engine:
     one per-row RQ decode (B=1 looped for correctness), vocoder CUDA graph
     for per-frame streaming decode.
 
-    `Engine()` with no args loads `vui-190k` from HuggingFace. Pass a name
+    `Engine()` with no args loads `vui-nano-1.1` from HuggingFace. Pass a name
     (resolved via `Engine.NAMES`), a HF filename, or a local path. Advanced
     callers can inject `model=` / `codec=` directly to bypass loading.
     """
@@ -293,6 +293,11 @@ class Engine:
         # 3x more stable with user codes in context than vui-nano
         # (run 3hggswum, step 190000); adds the sq/wps conditioning knobs.
         "vui-190k": "vui-190k.safetensors",
+        # RL-tuned from vui-190k (v6 ck18 — the production checkpoint since
+        # 2026-08-18). Same architecture; paired 12-line eval WER 9.4% -> 2.9%,
+        # catastrophic renders 1.54% -> 0.71% over 2400. The babble probe gate
+        # is not needed (and not loaded) on this checkpoint.
+        "vui-nano-1.1": "vui-nano-1.1.safetensors",
     }
 
     def __new__(cls, *args, **kwargs):
@@ -312,7 +317,7 @@ class Engine:
 
     def __init__(
         self,
-        name: str = "vui-190k",
+        name: str = "vui-nano-1.1",
         *,
         model: Vui | None = None,
         codec: QwenCodecDecoder | None = None,

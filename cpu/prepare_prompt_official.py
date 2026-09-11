@@ -1,6 +1,10 @@
 """Build a C-engine KV cache from an OFFICIAL vui prompt safetensors (preloaded voice).
 Uses the shipped exact transcript + pre-encoded codes + spk_token_emb (no whisper, no re-encode).
-Usage: prepare_prompt_official.py <prompt.safetensors> <prompt.txt> <out_cache.bin> <checkpoint>
+Usage: prepare_prompt_official.py <prompt.safetensors> <out_cache.bin> <checkpoint> [<prompt.txt>]
+
+The transcript is read from the safetensors metadata (`config.text`); pass a
+<prompt.txt> only for legacy prompt files that predate it. Use the prompt folder
+baked for your checkpoint (e.g. prompts/vui-nano-1.1/ for vui-nano-1.1).
 
 This is how the shipped prompt_<voice>_official.bin caches were built. Inputs are the
 official vui release prompt files (prompts/<voice>.safetensors holding `codes` +
@@ -18,9 +22,19 @@ from safetensors.torch import load_file
 
 from vui.model import Vui
 
-st_path, txt_path, out_path, ckpt = sys.argv[1:5]
+if len(sys.argv) < 4:
+    raise SystemExit(__doc__)
+st_path, out_path, ckpt = sys.argv[1:4]
+txt_path = sys.argv[4] if len(sys.argv) > 4 else None
 P = load_file(st_path)
-prompt_text = open(txt_path).read().strip()
+if txt_path:
+    prompt_text = open(txt_path).read().strip()
+else:
+    from vui.prompt_files import read_prompt_metadata
+
+    prompt_text = read_prompt_metadata(st_path).get("text", "").strip()
+    if not prompt_text:
+        raise SystemExit(f"{st_path} has no transcript in its metadata; pass <prompt.txt>")
 codes = P["codes"].long()  # (T, 16)
 spk_token = P["spk_token_emb"].float()  # (1,1,768) already spk_proj'd
 print(f"official prompt: text='{prompt_text[:60]}...' codes={tuple(codes.shape)}")
