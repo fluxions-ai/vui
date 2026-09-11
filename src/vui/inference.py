@@ -51,7 +51,10 @@ def asr(chunk, model=None, prefix=None, prompt=None):
     if model is not None:
         wm = model
     elif wm is None:
-        wm = whisper.load_model("turbo", "cuda")
+        # Whisper's sparse ops aren't implemented on MPS, so non-CUDA boxes
+        # (Apple Silicon included) fall back to CPU rather than crashing in
+        # torch.load on a CUDA-pickled checkpoint.
+        wm = whisper.load_model("turbo", "cuda" if torch.cuda.is_available() else "cpu")
 
     chunk = whisper.pad_or_trim(chunk)
     mel = whisper.log_mel_spectrogram(chunk, n_mels=wm.dims.n_mels).to(wm.device)

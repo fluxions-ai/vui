@@ -19,7 +19,7 @@ from vui.qwen_codec import SAMPLE_RATE as SR  # 24 kHz
 from vui.qwen_codec import QwenCodecEncoder
 from vui.inference import asr
 
-engine = Engine()  # name="vui-nano" by default; pass a name or local path to override
+engine = Engine()  # name="vui-190k" by default; pass a name or local path to override
 
 # Encode the voice prompt (audio + transcript -> Segment)
 wav_16k = AudioDecoder("prompts/abraham.wav", sample_rate=16000, num_channels=1) \

@@ -30,6 +30,8 @@ It is built around **Vui Nano — a small, context-aware text-to-speech model tr
 
 Most TTS models synthesise one utterance in isolation. Vui Nano generates each reply *inside the conversation*: the whole dialogue so far — your text **and the actual audio of your turn** — lives in the KV cache it decodes from, across a ~6-minute context. It was trained on two-speaker dialogue with an explicit speaker-change token, so it carries prosody across turns and produces the things real speech has and read-aloud corpora don't: breaths, laughter, hesitations, and overlap.
 
+The handful of other open models that condition on dialogue acoustics this way are an order of magnitude larger and GPU-only. Vui Nano does it at 219M active parameters, and the C build in [`cpu/`](cpu/README.md) does it on a CPU with no Python, PyTorch, or ONNX at runtime.
+
 Want the TTS model on its own, without the assistant? See [Vui Nano](#vui-nano) for the model card, `demo.py` for a standalone Gradio playground, and [`cpu/`](cpu/README.md) for the single-binary CPU build.
 
 > **Want the latest models and production-grade turn-taking?** This repo is the open core. Our [production API](https://fluxions.ai) ships ongoing model updates and a more advanced turn-taking system, on hardened, low-latency infrastructure built for scale. Get in touch at [fluxions.ai](https://fluxions.ai).
@@ -329,6 +331,97 @@ One realtime stream is ~17.8 GFLOP/s (12.5 frames/s × 2 × 711.7 MMAC). Against
 **The model can clone arbitrary voices** — upload a sample in the demo UI (or drop a `.wav` into `prompts/`) and it will follow that speaker. **Cloned voices won't sound as good as the four fine-tuned voices** (`maeve`, `abraham`, `rhian`, `harry`) shipped in `prompts/` — the released checkpoint has been fine-tuned on those four, so they're the highest-quality output the model can produce. Arbitrary clones work but expect lower naturalness, more drift, and some bias toward the fine-tuned speakers' prosody.
 
 For best results: voice-prompt transcript must match the audio word-for-word, aim for **30 seconds or more** of clean source audio (6-minute context window), and remember garbage in = garbage out. Full guide on voice prompts, supported tags ([breath], [laugh], [sigh] …), punctuation rules, and phonetic spelling for numbers/dates/units: [`docs/prompting.md`](docs/prompting.md).
+
+#### Clone a voice from the CLI
+
+Point `--prompt` at any `.wav`. No transcript needed — it's produced by ASR automatically.
+
+```sh
+python demo.py --render --prompt /path/to/your_voice.wav --text "Hello, this is my cloned voice."
+```
+
+#### Clone a voice from Python
+
+Cloning is a **prefill**: you hand the model one or more `Segment(text, codes)` pairs — the reference transcript plus its encoded audio — and everything you render afterwards follows that speaker. For references under ~15 seconds, one segment is all you need:
+
+```python
+import torch
+from julius.resample import resample_frac
+from torchcodec.decoders import AudioDecoder
+from torchcodec.encoders import AudioEncoder
+
+from vui.engine import Engine, GenConfig, Segment
+from vui.inference import asr
+from vui.qwen_codec import SAMPLE_RATE as SR  # 24 kHz
+from vui.qwen_codec import QwenCodecEncoder
+
+engine = Engine()
+
+# The codec encoder is a torch model on every backend (CPU is fine — it only
+# runs once per reference, and Engine() itself uses MLX on Apple Silicon).
+dev = "cuda" if torch.cuda.is_available() else "cpu"
+
+# 1. Load the reference voice at 16 kHz
+wav_16k = AudioDecoder("prompts/abraham.wav", sample_rate=16000, num_channels=1) \
+    .get_all_samples().data.squeeze(0)
+
+# 2. Encode it to codec codes (the model conditions on these, not on raw audio)
+codec_enc = QwenCodecEncoder.from_pretrained().to(dev).float().eval()
+with torch.inference_mode():
+    codes = codec_enc.encode(resample_frac(wav_16k.unsqueeze(0), 16000, SR).float().to(dev).unsqueeze(0))
+prompt_codes = codes[0, : engine.Q].T.long()  # (T, Q)
+
+# 3. Transcribe it — the transcript must match the audio word-for-word
+prompt_text = asr(wav_16k)
+
+# 4. Prefill the speaker, then render anything in that voice
+with engine.new_row() as row:
+    row.prefill([Segment(prompt_text, prompt_codes)])
+    _, audio = row.render(
+        "So [breath] the thing about this is, it's not what you'd expect.",
+        GenConfig(temperature=0.7, max_secs=10),
+    )
+
+AudioEncoder(audio.squeeze().cpu().float().unsqueeze(0), sample_rate=SR).to_file("out.wav")
+```
+
+`row.rewind()` returns the KV cache to end-of-prompt, so you can render many lines in the same voice without re-encoding the reference.
+
+**References longer than ~15s must be chunked.** A single 60-second segment destroys the model's per-segment speaker prefix and the output drifts off-speaker. `build_prompt_segments` does the ASR, forced alignment, and sentence-boundary splitting for you:
+
+```python
+from vui.prompt_utils import build_prompt_segments
+
+segments = build_prompt_segments(
+    wav_16k,
+    encode_codes=lambda a: codec_enc.encode(
+        resample_frac(a.unsqueeze(0), 16000, SR).float().to(dev).unsqueeze(0)
+    )[0, : engine.Q].T.long(),
+    transcribe=asr,       # any (audio_16k) -> str works
+    align_device=dev,
+    target_seg=10.0,      # sweet spot for the released checkpoint
+)
+
+with engine.new_row() as row:
+    row.prefill([Segment(t, c) for t, c in segments])
+    _, audio = row.render("Your text here.", GenConfig(temperature=0.7))
+```
+
+It's expensive (ASR + Wav2Vec2 alignment, several seconds), so pickle the segments and reuse them — see `_save_prompt_to_disk` in `demo.py`. Full guide, including streaming, continuous batching and the MLX path: [`docs/python-api.md`](docs/python-api.md).
+
+#### Clone a voice on CPU
+
+The C build clones too — `prepare_prompt.py` transcribes, encodes, and prefills a reference into a reusable KV cache file, then the binary runs with no Python at all:
+
+```sh
+cd cpu
+python export_full.py vui-nano.safetensors vui_full.bin          # one-time
+gcc -O3 -march=native -ffast-math -fopenmp -o vui_tts vui_tts.c -lm -lopenblas
+
+python prepare_prompt.py /path/to/your_voice.wav prompt_cache.bin
+OMP_NUM_THREADS=4 ./vui_tts vui_full.bin --kv-cache prompt_cache.bin \
+    --text "Hello from a CPU." --output out.wav
+```
 
 If you need a checkpoint tuned to a specific voice for a legitimate use case (audiobooks, accessibility, game characters, dubbing of consenting performers, internal tooling), **get in touch** via [fluxions.ai](https://fluxions.ai) — we can train, license, or host one for you.
 
