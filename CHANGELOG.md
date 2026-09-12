@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-09-12
+
+### Changed
+
+- **torch is a range for consumers, a pin for the checkout.** `vui-tts` now
+  declares `torch>=2.11,<2.13` (with `torchaudio>=2.11,<2.13`,
+  `torchcodec>=0.11,<0.13`) instead of `==2.11.*`: torch 2.11.0 itself
+  declares `setuptools<82`, which cannot co-resolve with frameworks that pin
+  a newer setuptools (Pipecat's dev group does), so integrations must be free
+  to take 2.12. This checkout's `uv.lock` stays on the release-tested 2.11
+  through `[tool.uv] constraint-dependencies`. Verified on torch 2.12.1 with
+  the 12-line paired eval: CUDA on a 5090 5.95% mean WER vs 6.96% on 2.11
+  (noise-level, same lines over 10%); MLX on M4 0.0% WER at 1.7× realtime.
+  Note for `pip install vui-tts` on CUDA: without flash-attn the engine runs
+  the SDPA fallback — correct, but 2.7× realtime on the 5090 against 10× with
+  the kernel. Install a flash-attn wheel for your torch/CUDA to get it back.
+
 ## [1.1.0] - 2026-09-12
 
 ### Added
