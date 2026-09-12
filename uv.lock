@@ -2051,7 +2051,7 @@ wheels = [
 
 [[package]]
 name = "vui-tts"
-version = "1.1.1"
+version = "1.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "einops" },
@@ -2133,9 +2133,9 @@ requires-dist = [
     { name = "soundfile", specifier = ">=0.12" },
     { name = "tiktoken", specifier = ">=0.8" },
     { name = "tokenizers", specifier = ">=0.20" },
-    { name = "torch", specifier = ">=2.11,<2.13" },
-    { name = "torchaudio", specifier = ">=2.11,<2.13" },
-    { name = "torchcodec", specifier = ">=0.11,<0.13" },
+    { name = "torch", specifier = ">=2.11,<2.14" },
+    { name = "torchaudio", specifier = ">=2.11,<2.14" },
+    { name = "torchcodec", specifier = ">=0.11,<0.14" },
     { name = "transformers", specifier = ">=4.45" },
 ]
 provides-extras = ["server", "flash", "mlx", "moonshine"]
