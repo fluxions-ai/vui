@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-09-12
+
+### Fixed
+
+- **CUDA `Row.rewind()` left the previous turn in the codec context.** The
+  KV cache went back to the end of the voice prompt, but the codec's rolling
+  context kept the frames just generated, so the next turn's first frames
+  were vocoded against the previous turn's tail instead of the prompt. The
+  row now keeps its prompt codes and `rewind()` re-seeds the codec context
+  from them (`reset()` clears it) — the MLX engine already did this.
+  Surfaced by review on the LiveKit plugin; any caller rendering several
+  turns on one row (the Pipecat and LiveKit integrations) was affected.
+  Rewinds to any other offset — the streaming server's cancel path — leave
+  the codec alone, as before. Verified on a 5090: after a rewind the codec
+  context holds exactly the prompt frames and the next turn renders at 0.0%
+  WER.
+- `Row.stream()` docstring now says what the yielded tensor is: the vocoder
+  graph's static output buffer, overwritten by the next frame — copy it
+  before advancing the generator.
+
 ## [1.1.2] - 2026-09-12
 
 ### Changed
