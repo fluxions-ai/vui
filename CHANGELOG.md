@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.4] - 2026-09-12
+
+### Added
+
+- `py.typed` marker in the `vui` package, so type checkers treat `vui-tts` as a
+  typed library instead of an untyped import (surfaced by LiveKit's mypy CI).
+
 ## [1.1.3] - 2026-09-12
 
 ### Fixed
