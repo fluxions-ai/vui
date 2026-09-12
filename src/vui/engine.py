@@ -167,6 +167,10 @@ class Row:
         self._engine = engine
         self._idx = idx
         self._prompt_offset = 0
+        # Prompt codes (1, Q, T) on device — what the codec context is re-seeded
+        # from on rewind(), so a new turn decodes against the voice prompt and
+        # not against whatever the previous turn generated.
+        self._prompt_codes: Tensor | None = None
         self._spk_token: Tensor | None = None
         self._spk_token_2: Tensor | None = None  # optional 2nd speaker
         self._active_speaker = 0  # 0 or 1 — flipped on [SC] chunks
@@ -220,8 +224,11 @@ class Row:
     ) -> Iterator[Tensor]:
         """Generate audio frame-by-frame using the vocoder CUDA graph.
 
-        Yields (1, 1, DOWNSAMPLE_RATE) float audio tensors on GPU. Caller
-        concatenates or moves to CPU as needed. B=1 only.
+        Yields (1, 1, DOWNSAMPLE_RATE) float audio tensors on GPU. Each yielded
+        tensor is the vocoder graph's static output buffer, overwritten by the
+        next frame: copy it (`.clone()` / `.cpu()` / `.numpy()`) before
+        advancing the generator — collecting the yielded tensors and
+        concatenating afterwards gives you N copies of the last frame. B=1 only.
 
         Each text sub-chunk gets `[spk] text audio` written to the KV,
         matching the streamed_tts training format which produces `[spk]`
@@ -745,6 +752,19 @@ class Engine:
     def _rewind_row(self, row: Row, offset: int) -> int:
         with torch.inference_mode():
             self.model.decoder.flash_kv_caches[0].seq_lens[row.idx] = offset
+        # The codec's rolling context must move with the KV cache: back to the
+        # voice prompt on rewind(), empty on reset(). Otherwise the next turn's
+        # first frames are vocoded against the previous turn's tail (the MLX
+        # engine has always re-warmed here; the streaming server's TTSEngine
+        # adapter did it by hand). A rewind to any other offset — the server's
+        # cancel path trimming back to mid-conversation — leaves the codec
+        # alone: its streaming state can't be positioned arbitrarily, and the
+        # buffer still holds the user audio added since the prompt.
+        if offset == 0:
+            row._prompt_codes = None
+            row._codec_ctx.reset()
+        elif offset == row._prompt_offset and row._prompt_codes is not None:
+            row._codec_ctx.set_prompt(row._prompt_codes)
         return offset
 
     # ------------------------------------------------------------------
@@ -856,9 +876,12 @@ class Engine:
                 if seg.codes is not None:
                     all_codes.append(seg.codes)
         if all_codes:
-            row._codec_ctx.set_prompt(
+            row._prompt_codes = (
                 torch.cat([c.to(self.device) for c in all_codes], dim=0).T.unsqueeze(0)
             )
+            row._codec_ctx.set_prompt(row._prompt_codes)
+        else:
+            row._prompt_codes = None
 
         with torch.inference_mode(), sdpa_kernel([SDPBackend.MATH]):
             # Always end each speaker's block with [SC] before its last audio:
