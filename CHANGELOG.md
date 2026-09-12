@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-09-12
+
+### Changed
+
+- **torch range extended to 2.13.** 1.1.1 stopped at `<2.13`, but torch 2.12
+  also declares `setuptools<82` — the first torch that co-resolves with a
+  modern setuptools pin is 2.13, which is what Pipecat locks. Consumers now
+  get `torch>=2.11,<2.14` / `torchcodec>=0.11,<0.14`; the checkout lock is
+  unchanged (2.11). Verified on torch 2.13.0 + torchcodec 0.13.0: MLX on M4
+  0.0% WER at 2.2× realtime; CUDA (5090, 12-line eval) 7.63% mean WER, in
+  the same band as 2.11's 6.96%.
+
 ## [1.1.1] - 2026-09-12
 
 ### Changed

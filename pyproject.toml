@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 # Apple Silicon — which is what integrations (Pipecat, LiveKit) depend on.
 # The voice-assistant server is the `server` extra.
 name = "vui-tts"
-version = "1.1.1"
+version = "1.1.2"
 description = "Vui Nano — a small, context-aware text-to-speech model trained on real conversations. 219M active params (305M total), Apache 2.0, voice cloning, streaming, runs on CPU. Ships with a full real-time voice assistant (WebRTC, ASR, local LLM, OpenAI Realtime API compatible)."
 readme = "README.md"
 license = "Apache-2.0"
@@ -26,15 +26,17 @@ classifiers = [
 requires-python = ">=3.12,<3.13"
 
 # Inference only: what `from vui.engine import Engine` needs on CUDA, MLX and CPU.
-# torch is a range, not a pin: torch 2.11.0 declares `setuptools<82`, which
-# collides with frameworks that pin a newer setuptools (Pipecat's dev group),
-# so consumers must be free to take 2.12. This checkout's own lock stays on
-# the release-tested 2.11 via `[tool.uv] constraint-dependencies` below;
-# torchcodec follows torch minor-for-minor.
+# torch is a range, not a pin: torch 2.11–2.12 declare `setuptools<82`, which
+# collides with frameworks that pin a newer setuptools (Pipecat locks torch
+# 2.13 + setuptools 83), so consumers must be free to take 2.12 or 2.13. This
+# checkout's own lock stays on the release-tested 2.11 via
+# `[tool.uv] constraint-dependencies` below; torchcodec follows torch
+# minor-for-minor (0.11 ↔ 2.11 … 0.13 ↔ 2.13). torchaudio's last release is
+# 2.11.0 and it carries no torch pin.
 dependencies = [
-    "torch>=2.11,<2.13",
-    "torchaudio>=2.11,<2.13",
-    "torchcodec>=0.11,<0.13",
+    "torch>=2.11,<2.14",
+    "torchaudio>=2.11,<2.14",
+    "torchcodec>=0.11,<0.14",
     "transformers>=4.45",
     "tokenizers>=0.20",
     "safetensors>=0.4",
