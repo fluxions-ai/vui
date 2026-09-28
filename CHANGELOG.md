@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Row.truncate(offset)`: rewind the KV to any position the row has already
+  written, e.g. back to what a listener heard of an interrupted reply. It is
+  the public face of the partial rewind the streaming server's cancel path
+  uses (`Engine._rewind_row`), with the same codec behaviour: `truncate(0)` is
+  `reset()`, truncating to the end of the prompt is `rewind()`, and any other
+  offset leaves the codec context as it is. An offset the row has not written
+  raises `ValueError`. The MLX row has it too.
+
 ## [1.1.4] - 2026-09-12
 
 ### Added

@@ -134,6 +134,18 @@ class MLXRow:
         self._prompt_codes = None
         return self._engine._rewind_row(self, 0)
 
+    def truncate(self, offset: int) -> int:
+        """Rewind KV to `offset`, a position this row has already written.
+
+        Mirrors `vui.engine.Row.truncate`; here the codec re-warms from the
+        prompt at any offset > 0.
+        """
+        if not 0 <= offset <= self.offset:
+            raise ValueError(f"offset {offset} is outside the row's KV (0..{self.offset})")
+        if offset == 0:
+            return self.reset()
+        return self._engine._rewind_row(self, offset)
+
     def close(self) -> None:
         if not self._closed:
             self._closed = True

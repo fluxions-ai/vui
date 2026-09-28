@@ -265,6 +265,20 @@ class Row:
         """Rewind KV to 0."""
         return self._engine._rewind_row(self, 0)
 
+    def truncate(self, offset: int) -> int:
+        """Rewind KV to `offset`, a position this row has already written.
+
+        Cuts a turn short — e.g. back to what a listener actually heard of a
+        reply interrupted mid-way, `offset` being the row's offset once the
+        last heard frame was written. `truncate(0)` is `reset()`, and
+        truncating to the end of the prompt re-seeds the codec context as
+        `rewind()` does. At any other offset the codec context is left as it
+        is: its buffer still holds the frames generated past `offset`.
+        """
+        if not 0 <= offset <= self.offset:
+            raise ValueError(f"offset {offset} is outside the row's KV (0..{self.offset})")
+        return self._engine._rewind_row(self, offset)
+
     def close(self) -> None:
         """Release the slot back to the engine's free pool."""
         if not self._closed:
