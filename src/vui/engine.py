@@ -23,6 +23,7 @@ Usage (batched, B=N):
 
 from __future__ import annotations
 
+import logging
 import os
 from collections import deque
 from collections.abc import Iterator
@@ -38,6 +39,8 @@ from vui.model import Vui
 from vui.qwen_codec import FRAME_RATE
 from vui.qwen_codec import SAMPLE_RATE as QWEN_SR
 from vui.qwen_codec import CodecCtx, QwenCodecDecoder
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_WPS = 3.0  # fallback words-per-second when prompt_wps unavailable
 
@@ -963,11 +966,15 @@ class Engine:
                 n_codes = codes.shape[0]
                 self._prefill_emb(row, self._audio_emb(codes))
                 row._codec_ctx.add(codes.T.unsqueeze(0).to(self.device))
-        sc = "+[SC]" if final else ""
-        print(
-            f"[Engine._add_user] T={T0}->{row.offset} "
-            f"text={n_text}tok{sc} codes={n_codes}f "
-            f"'{text[:40]}'"
+        # Debug level: the excerpt is what the user said.
+        logger.debug(
+            "[Engine._add_user] T=%d->%d text=%dtok%s codes=%df '%s'",
+            T0,
+            row.offset,
+            n_text,
+            "+[SC]" if final else "",
+            n_codes,
+            text[:40],
         )
         return row.offset
 

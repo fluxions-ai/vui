@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `model._cond_bias` by hand, as the streaming server does, and the token
   set that way was never written before the prompt segments.
 
+### Changed
+
+- `Row.add_user` no longer prints each user turn (with the first 40
+  characters of what the user said) to stdout; the line goes to the
+  `vui.engine` logger at DEBUG level, so an application embedding the engine
+  keeps transcripts out of its output unless it asks for them.
+
 ## [1.1.4] - 2026-09-12
 
 ### Added

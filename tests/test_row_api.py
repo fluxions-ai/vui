@@ -1,4 +1,5 @@
-"""Row / Engine public API that needs no GPU: KV truncation, speaker tokens, cond_bias.
+"""Row / Engine behaviour that needs no GPU: KV truncation, speaker tokens,
+cond_bias, user-turn logging.
 
 The engine is faked down to the one row's KV length and its codec context, so
 this runs on any box, CPU-only CI included.
@@ -165,3 +166,38 @@ def test_setting_cond_bias_to_none_zeroes_it():
     engine.cond_bias = None
 
     assert not engine.cond_bias.any()
+
+
+# ---------------------------------------------------------------- add_user
+
+
+class _FakeUserEngine(_FakeEngine):
+    """Writes a user turn's embeddings by advancing the row's KV length."""
+
+    _add_user = Engine._add_user
+
+    def __init__(self):
+        super().__init__()
+        self.device = torch.device("cpu")
+        self._sc_emb = torch.zeros(1, 1, D)
+
+    def _text_emb(self, text, with_cond_bias, noisy=False):
+        return torch.zeros(1, len(text.split()), D)
+
+    def _audio_emb(self, codes):
+        return torch.zeros(1, codes.shape[0], D)
+
+    def _prefill_emb(self, row, emb):
+        self.model.decoder.flash_kv_caches[0].seq_lens[row.idx] += emb.shape[1]
+
+
+def test_a_user_turn_is_logged_at_debug_level_not_printed(capsys, caplog):
+    engine = _FakeUserEngine()
+    row = Row(engine, 0)
+
+    with caplog.at_level("DEBUG", logger="vui.engine"):
+        row.add_user("my account number is", torch.zeros(5, Q, dtype=torch.long))
+
+    assert row.offset == 4 + 1 + 5
+    assert capsys.readouterr().out == ""
+    assert "T=0->10" in caplog.text
