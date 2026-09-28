@@ -1,4 +1,4 @@
-"""Row / Engine public API that needs no GPU: KV truncation.
+"""Row / Engine public API that needs no GPU: KV truncation, speaker tokens, cond_bias.
 
 The engine is faked down to the one row's KV length and its codec context, so
 this runs on any box, CPU-only CI included.
@@ -79,3 +79,89 @@ def test_truncate_refuses_an_offset_the_row_has_not_written(offset):
     with pytest.raises(ValueError, match="outside the row's KV"):
         row.truncate(offset)
     assert row.offset == 100
+
+
+# ----------------------------------------------------------- speaker token
+
+D = 8
+SPK_DIM = 1024  # QwenSpeakerEncoder.embed output
+
+
+class _FakeSpeakerEngine:
+    """What the prefill path needs to turn a speaker input into a token."""
+
+    _embed_speaker = Engine._embed_speaker
+
+    def __init__(self, with_proj: bool = True):
+        self.D = D
+        self.device = torch.device("cpu")
+        self.dtype = torch.bfloat16
+        proj = torch.nn.Linear(SPK_DIM, D) if with_proj else None
+        self.model = SimpleNamespace(
+            spk_proj=proj,
+            embed_speaker=lambda emb: proj(emb).reshape(1, 1, -1),
+        )
+
+
+def test_a_raw_speaker_embedding_is_projected_to_a_token():
+    engine = _FakeSpeakerEngine()
+
+    token = engine._embed_speaker(torch.randn(SPK_DIM))
+
+    assert token.shape == (1, 1, D)
+    assert token.dtype == torch.bfloat16
+
+
+def test_a_pre_projected_token_is_used_as_is():
+    engine = _FakeSpeakerEngine()
+    spk_token_emb = torch.randn(1, 1, D)
+
+    token = engine._embed_speaker(spk_token_emb)
+
+    assert token.dtype == torch.bfloat16
+    assert torch.equal(token, spk_token_emb.to(torch.bfloat16))
+
+
+def test_no_speaker_input_gives_no_token():
+    assert _FakeSpeakerEngine()._embed_speaker(None) is None
+
+
+def test_a_raw_embedding_gives_no_token_without_a_projection():
+    engine = _FakeSpeakerEngine(with_proj=False)
+
+    assert engine._embed_speaker(torch.randn(SPK_DIM)) is None
+
+
+# --------------------------------------------------------------- cond_bias
+
+
+class _FakeBiasEngine:
+    cond_bias = Engine.cond_bias
+
+    def __init__(self, inference_buffer: bool = False):
+        if inference_buffer:  # the model's buffer when built under inference_mode
+            with torch.inference_mode():
+                self._cond_bias = torch.zeros(1, 1, D, dtype=torch.bfloat16)
+        else:
+            self._cond_bias = torch.zeros(1, 1, D, dtype=torch.bfloat16)
+
+
+@pytest.mark.parametrize("inference_buffer", [False, True])
+def test_setting_cond_bias_copies_into_the_model_buffer(inference_buffer):
+    engine = _FakeBiasEngine(inference_buffer)
+    buffer = engine._cond_bias
+    baked = torch.randn(D)
+
+    engine.cond_bias = baked
+
+    assert engine.cond_bias is buffer
+    assert torch.equal(buffer, baked.reshape(1, 1, D).to(torch.bfloat16))
+
+
+def test_setting_cond_bias_to_none_zeroes_it():
+    engine = _FakeBiasEngine()
+    engine.cond_bias = torch.ones(1, 1, D)
+
+    engine.cond_bias = None
+
+    assert not engine.cond_bias.any()

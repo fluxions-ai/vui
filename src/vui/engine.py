@@ -198,7 +198,10 @@ class Row:
         """Prefill this row with `[spk] text_i codes_i` for each segment.
 
         spk_emb is projected once via model.embed_speaker and re-injected
-        before every segment's text (matching training chunk format).
+        before every segment's text (matching training chunk format). A
+        (1, 1, d_model) tensor is taken as an already-projected token — the
+        `spk_token_emb` an official prompt ships — and used as is, as the
+        MLX engine does.
 
         For two-speaker conversations, pass `segments_2` + `spk_emb_2`; both
         speakers are prefilled in order, and the stream/render loop alternates
@@ -795,6 +798,23 @@ class Engine:
         self.model.set_cond_bias(sq_scores=sq_scores, wps_score=wps_score)
         self._cond_bias = self.model._cond_bias
 
+    @property
+    def cond_bias(self) -> Tensor:
+        """The (1, 1, d_model) bias added to agent text embeddings.
+
+        Assign an official prompt's baked `cond_bias` to it (None zeroes it),
+        as on MLX. The value is copied into the model's buffer in place.
+        """
+        return self._cond_bias
+
+    @cond_bias.setter
+    def cond_bias(self, bias: Tensor | None) -> None:
+        with torch.inference_mode():
+            if bias is None:
+                self._cond_bias.zero_()
+            else:
+                self._cond_bias.copy_(bias.reshape(1, 1, -1))
+
     # ------------------------------------------------------------------
     # Prefill (shared between prompt, user, and agent)
     # ------------------------------------------------------------------
@@ -837,7 +857,11 @@ class Engine:
         return self.model.embed_audio(pc).to(self.dtype)
 
     def _embed_speaker(self, spk_emb: Tensor | None) -> Tensor | None:
-        if spk_emb is None or self.model.spk_proj is None:
+        if spk_emb is None:
+            return None
+        if spk_emb.dim() == 3 and spk_emb.shape[-1] == self.D:
+            return spk_emb.to(self.device, self.dtype)  # pre-projected token (official prompts)
+        if self.model.spk_proj is None:
             return None
         return self.model.embed_speaker(spk_emb).to(self.dtype)
 

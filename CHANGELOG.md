@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `reset()`, truncating to the end of the prompt is `rewind()`, and any other
   offset leaves the codec context as it is. An offset the row has not written
   raises `ValueError`. The MLX row has it too.
+- **Official voices on CUDA through the public API, as on MLX.**
+  `vui.prompt_files.load_official_prompt` returns the pre-baked transcript,
+  codes, speaker token and conditioning bias as torch tensors;
+  `Engine.cond_bias` can be assigned (it copies into the model's buffer, None
+  zeroes it); and `Row.prefill(spk_emb=...)` takes a `(1, 1, d_model)` tensor
+  as an already-projected token instead of projecting it again — the MLX
+  engine's rule. Until now a CUDA caller had to set `row._spk_token` and
+  `model._cond_bias` by hand, as the streaming server does, and the token
+  set that way was never written before the prompt segments.
 
 ## [1.1.4] - 2026-09-12
 

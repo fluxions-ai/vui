@@ -3,9 +3,9 @@
 A prompt is `<voice>.safetensors` holding codec `codes` (checkpoint-agnostic)
 plus a baked `cond_bias` / `spk_token_emb` pair (checkpoint-specific), with the
 exact transcript in the safetensors metadata (`config.text`). The Python engine
-and the streaming server only need codes + transcript; the `cpu/` C engine and
-the MLX engine also consume the baked pair, so each checkpoint has its own
-folder on the Hub:
+and the streaming server only need codes + transcript; the `cpu/` C engine, the
+MLX engine and `load_official_prompt` (for the CUDA engine) also consume the
+baked pair, so each checkpoint has its own folder on the Hub:
 
     prompts/                 baked for vui-nano (also the .wav sources + legacy .txt)
     prompts/vui-nano-1.1/    baked for vui-nano-1.1
@@ -17,6 +17,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from torch import Tensor
 
 HF_REPO = "fluxions/vui"
 
@@ -83,3 +87,36 @@ def hub_prompt_transcript(voice: str, local_st: str | Path) -> str:
     from huggingface_hub import hf_hub_download
 
     return Path(hf_hub_download(HF_REPO, f"prompts/{voice}.txt")).read_text().strip()
+
+
+def load_official_prompt(
+    voice: str,
+    prompt_dir: str | Path | None = None,
+    checkpoint: str | Path | None = None,
+) -> tuple[str, Tensor, Tensor, Tensor | None]:
+    """Returns (transcript, codes (T,Q) long, spk_token (1,1,d), cond_bias|None) as torch tensors.
+
+    The CUDA counterpart of `vui.mlx.engine.load_official_prompt`: set
+    `engine.cond_bias = cond_bias` and prefill with `spk_emb=spk_token`.
+    `spk_token_emb` / `cond_bias` are checkpoint-specific, so pass the
+    engine's `checkpoint` to download the set baked for it; `prompt_dir`
+    reads a local `<voice>.safetensors` instead.
+    """
+    from safetensors.torch import load_file
+
+    if prompt_dir:
+        st_path = str(Path(prompt_dir) / f"{voice}.safetensors")
+        text = prompt_transcript(st_path)
+        if not text:
+            raise FileNotFoundError(f"no transcript for {st_path} (metadata or sibling .txt)")
+    else:
+        st_path = hub_prompt(voice, checkpoint)
+        text = hub_prompt_transcript(voice, st_path)
+    st = load_file(st_path)
+    cond_bias = st.get("cond_bias")
+    return (
+        text,
+        st["codes"].long(),
+        st["spk_token_emb"].float(),  # (1, 1, d) pre-projected
+        cond_bias.float() if cond_bias is not None else None,
+    )

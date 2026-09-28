@@ -50,6 +50,24 @@ AudioEncoder(audio.squeeze().cpu().float().unsqueeze(0), sample_rate=SR) \
 
 `row.render()` returns `(codes (T, Q), audio (1, 1, S))`. The audio is already decoded through the Qwen codec; if you only need the raw codec codes (e.g. to ship across the wire and decode elsewhere), use `engine._render_row(row, text, cfg)` and skip the vocoder.
 
+## Official voices (no encoder needed)
+
+The official voices (`maeve`, `abraham`, `rhian`, `harry`) ship pre-baked for each checkpoint: codes, transcript, a speaker token already projected for the model, and a conditioning bias. `vui.prompt_files.load_official_prompt` downloads the set baked for your engine's checkpoint and returns them as torch tensors; the speaker token goes to `prefill` as `spk_emb` (a `(1, 1, d_model)` tensor is used as is, not projected again):
+
+```python
+from vui.engine import Engine, GenConfig, Segment
+from vui.prompt_files import load_official_prompt
+
+engine = Engine()
+text, codes, spk_token, cond_bias = load_official_prompt("maeve", checkpoint=engine.checkpoint)
+engine.cond_bias = cond_bias
+with engine.new_row() as row:
+    row.prefill([Segment(text=text, codes=codes)], spk_emb=spk_token)
+    codes_out, audio = row.render("Hello!", GenConfig(temperature=0.7))
+```
+
+On Apple Silicon use `vui.mlx.engine.load_official_prompt`, which returns MLX arrays (see [below](#apple-silicon-mlx)).
+
 ## Properly chunked prompts (long voice references)
 
 The minimal example above works for prompts under ~15 seconds. **For longer references — and you want longer, the model improves up to a couple of minutes — you have to chunk.** Stuffing a single 60-second `(text, codes)` segment into prefill destroys the model's per-segment speaker prefix and the output drifts off the speaker.
