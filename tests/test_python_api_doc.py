@@ -1,8 +1,9 @@
 """Test that the code examples in docs/python-api.md actually run.
 
-Exercises: minimal example, chunked prompt, streaming, continuous batching,
-codes-only decode, cleanup. Substitutes prompts/rhian.wav (30.8s) for the
-chunked-prompt path; falls back to abraham.wav for the short-prompt path.
+Exercises: minimal example, official voice, chunked prompt, streaming,
+truncate, continuous batching, codes-only decode, cleanup. Substitutes
+prompts/rhian.wav (30.8s) for the chunked-prompt path; falls back to
+abraham.wav for the short-prompt path.
 """
 
 from __future__ import annotations
@@ -77,6 +78,51 @@ def test_minimal():
     AudioEncoder(audio.squeeze().cpu().float().unsqueeze(0), sample_rate=SR) \
         .to_file(str(OUT_DIR / "minimal.wav"))
     print(f"codes: {codes.shape}, audio: {audio.shape} -> minimal.wav")
+
+
+# --- Block: official voice (pre-baked prompt, no encoder) ---
+def test_official_voice():
+    from vui.prompt_files import load_official_prompt
+
+    text, codes, spk_token, cond_bias = load_official_prompt(
+        "maeve", checkpoint=engine.checkpoint
+    )
+    engine.cond_bias = cond_bias
+    try:
+        with engine.new_row() as row:
+            row.prefill([Segment(text=text, codes=codes)], spk_emb=spk_token)
+            assert torch.equal(row._spk_token, spk_token.to(engine.device, engine.dtype))
+            codes_out, audio = row.render("Hello!", GenConfig(temperature=0.7))
+    finally:
+        engine.cond_bias = None
+    assert codes_out.dim() == 2 and audio.shape[-1] > 0
+    AudioEncoder(audio.squeeze().cpu().float().unsqueeze(0), sample_rate=SR) \
+        .to_file(str(OUT_DIR / "official_voice.wav"))
+    print(f"prompt '{text[:40]}', codes: {codes_out.shape} -> official_voice.wav")
+
+
+# --- Block: truncate back to what a listener heard ---
+def test_truncate():
+    import threading
+
+    from vui.prompt_files import load_official_prompt
+
+    text, codes, spk_token, _ = load_official_prompt("maeve", checkpoint=engine.checkpoint)
+    cancel = threading.Event()
+    with engine.new_row() as row:
+        row.prefill([Segment(text=text, codes=codes)], spk_emb=spk_token)
+        offsets = []
+        for _ in row.stream("A reply the listener cuts off half way.", GenConfig(), cancel):
+            offsets.append(row.offset)
+            if len(offsets) == 20:
+                cancel.set()
+        heard = 8
+        assert row.truncate(offsets[heard - 1] + 1) == row.offset
+        row.add_user("Wait, what?")
+        frames = row.stream("Sorry.", GenConfig())
+        audio = torch.cat([f.float().cpu().reshape(-1) for f in frames])
+    assert audio.numel() > 0
+    print(f"cut to {heard} of {len(offsets)} frames, reply after: {audio.numel()} samples")
 
 
 # --- Block: chunked prompt via build_prompt_segments ---
@@ -224,8 +270,10 @@ def test_render_all_signature_matches_doc():
 
 
 check("minimal_example", test_minimal)
+check("official_voice", test_official_voice)
 check("chunked_prompt", test_chunked_prompt)
 check("streaming", test_streaming)
+check("truncate", test_truncate)
 check("continuous_batching", test_continuous_batching)
 check("codes_only_decode", test_codes_only_decode)
 check("no_teardown_in_doc", test_no_teardown_in_doc)
