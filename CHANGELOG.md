@@ -9,13 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `Row.truncate(offset)`: rewind the KV to any position the row has already
-  written, e.g. back to what a listener heard of an interrupted reply. It is
-  the public face of the partial rewind the streaming server's cancel path
-  uses (`Engine._rewind_row`), with the same codec behaviour: `truncate(0)` is
-  `reset()`, truncating to the end of the prompt is `rewind()`, and any other
-  offset leaves the codec context as it is. An offset the row has not written
-  raises `ValueError`. The MLX row has it too.
+- `Row.truncate(offset)`: move the KV back to any offset between the end of
+  the prompt and `row.offset`, e.g. to drop an interrupted reply. At the end
+  of the prompt it re-seeds the codec context as `rewind()` does; past it the
+  codec context is left as it is. Offsets outside that range raise
+  `ValueError`. On both engines.
 - **Official voices on CUDA through the public API, as on MLX.**
   `vui.prompt_files.load_official_prompt` returns the pre-baked transcript,
   codes, speaker token and conditioning bias as torch tensors;
@@ -28,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `Row.reset()` also clears the end-of-prompt offset, so a later `rewind()`
+  no longer jumps back to a prompt that is gone.
 - `Row.add_user` no longer prints each user turn (with the first 40
   characters of what the user said) to stdout; the line goes to the
   `vui.engine` logger at DEBUG level, so an application embedding the engine

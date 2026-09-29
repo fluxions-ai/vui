@@ -101,7 +101,7 @@ def test_official_voice():
     print(f"prompt '{text[:40]}', codes: {codes_out.shape} -> official_voice.wav")
 
 
-# --- Block: truncate back to what a listener heard ---
+# --- Block: truncate (drop a turn, or keep what the listener heard) ---
 def test_truncate():
     import threading
 
@@ -110,17 +110,25 @@ def test_truncate():
     text, codes, spk_token, _ = load_official_prompt("maeve", checkpoint=engine.checkpoint)
     cancel = threading.Event()
     with engine.new_row() as row:
-        row.prefill([Segment(text=text, codes=codes)], spk_emb=spk_token)
+        before = row.prefill([Segment(text, codes)], spk_emb=spk_token)
         offsets = []
         for _ in row.stream("A reply the listener cuts off half way.", GenConfig(), cancel):
             offsets.append(row.offset)
             if len(offsets) == 20:
                 cancel.set()
+        heard_all = min(offsets[-1] + 1, row.offset)
+        assert row.truncate(heard_all) == row.offset == heard_all
         heard = 8
         assert row.truncate(offsets[heard - 1] + 1) == row.offset
         row.add_user("Wait, what?")
         frames = row.stream("Sorry.", GenConfig())
         audio = torch.cat([f.float().cpu().reshape(-1) for f in frames])
+        assert row.truncate(before) == row.offset == before
+        try:
+            row.truncate(before - 1)
+            raise AssertionError("truncate into the prompt must raise")
+        except ValueError:
+            pass
     assert audio.numel() > 0
     print(f"cut to {heard} of {len(offsets)} frames, reply after: {audio.numel()} samples")
 

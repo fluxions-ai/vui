@@ -9,7 +9,7 @@ so the README Python API works unchanged on M-series:
         codes, audio = row.render("Hello there!", GenConfig(temperature=0.7))
 
 Single-row only: the Row surface (prefill / add_user / stream / render /
-rewind / reset) matches the CUDA engine; continuous batching (max_rows > 1),
+rewind / reset / truncate) matches the CUDA engine; continuous batching (max_rows > 1),
 two-speaker prefill, and the entropy/probe gates stay CUDA-only. Repetition
 penalty state is per-chunk here rather than per-render-call.
 """
@@ -131,19 +131,21 @@ class MLXRow:
 
     def reset(self) -> int:
         """Rewind KV to 0."""
+        self._prompt_offset = 0
         self._prompt_codes = None
         return self._engine._rewind_row(self, 0)
 
     def truncate(self, offset: int) -> int:
-        """Rewind KV to `offset`, a position this row has already written.
+        """Rewind KV to `offset`, between the end of the prompt and `self.offset`.
 
         Mirrors `vui.engine.Row.truncate`; here the codec re-warms from the
-        prompt at any offset > 0.
+        prompt at any offset.
         """
-        if not 0 <= offset <= self.offset:
-            raise ValueError(f"offset {offset} is outside the row's KV (0..{self.offset})")
-        if offset == 0:
-            return self.reset()
+        if not self._prompt_offset <= offset <= self.offset:
+            raise ValueError(
+                f"offset {offset} is outside {self._prompt_offset}..{self.offset} "
+                "(end of prompt..row offset); reset() clears the prompt"
+            )
         return self._engine._rewind_row(self, offset)
 
     def close(self) -> None:

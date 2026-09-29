@@ -179,7 +179,7 @@ Notes:
 - Pass a `cancel=threading.Event()` (or any `.is_set()`-able object) to abort mid-generation; the loop checks per frame and exits cleanly.
 - `reset_rep=False` keeps the repetition-penalty history across multiple `.stream()` calls — useful when you feed LLM chunks one at a time and want rep-penalty to span the full turn.
 - `row.rewind()` returns the KV to end-of-prompt without re-prefilling, so you can render another turn with the same speaker prefix already cached.
-- `row.truncate(offset)` returns the KV to any position the row has already written — for instance a `row.offset` noted while streaming, to keep only the part of an interrupted reply the listener heard. `truncate(0)` is `reset()` and truncating to the end of the prompt is `rewind()`; at any other offset the codec context is left as it is.
+- `row.truncate(offset)` moves the KV back to `offset`, anywhere from the end of the prompt to `row.offset`. Note `row.offset` before a turn and truncate to it to drop that turn, e.g. a reply the listener interrupted. To keep the part they heard instead: a frame is written to the KV when the next one is generated, so the `row.offset` read as frame *i* is yielded, plus one, keeps frames up to *i* (cap it at `row.offset`).
 
 ## Continuous batching (many concurrent renders)
 

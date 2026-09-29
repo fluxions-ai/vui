@@ -57,15 +57,6 @@ def test_truncate_to_the_end_of_the_prompt_reseeds_the_codec_like_rewind():
     assert row._codec_ctx._buf.shape == (1, Q, 25)
 
 
-def test_truncate_to_zero_empties_the_row_like_reset():
-    row = _row(written=100)
-
-    assert row.truncate(0) == 0
-    assert row.offset == 0
-    assert row._codec_ctx._buf is None
-    assert row._prompt_codes is None
-
-
 def test_truncate_to_the_current_offset_is_a_no_op():
     row = _row(written=100)
 
@@ -73,13 +64,23 @@ def test_truncate_to_the_current_offset_is_a_no_op():
     assert row.offset == 100
 
 
-@pytest.mark.parametrize("offset", [-1, 101])
-def test_truncate_refuses_an_offset_the_row_has_not_written(offset):
-    row = _row(written=100)
+@pytest.mark.parametrize("offset", [-1, 0, 39, 101])
+def test_truncate_refuses_an_offset_outside_the_prompt_end_to_the_row_offset(offset):
+    row = _row(written=100, prompt_offset=40)
 
-    with pytest.raises(ValueError, match="outside the row's KV"):
+    with pytest.raises(ValueError, match="outside 40..100"):
         row.truncate(offset)
     assert row.offset == 100
+
+
+def test_reset_forgets_the_prompt():
+    row = _row(written=100, prompt_offset=40)
+
+    row.reset()
+
+    assert row._prompt_offset == 0
+    assert row.rewind() == 0
+    assert row.truncate(0) == 0
 
 
 # ----------------------------------------------------------- speaker token
