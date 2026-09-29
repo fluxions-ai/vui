@@ -3,9 +3,9 @@
 A prompt is `<voice>.safetensors` holding codec `codes` (checkpoint-agnostic)
 plus a baked `cond_bias` / `spk_token_emb` pair (checkpoint-specific), with the
 exact transcript in the safetensors metadata (`config.text`). The Python engine
-and the streaming server only need codes + transcript; the `cpu/` C engine, the
-MLX engine and `load_official_prompt` (for the CUDA engine) also consume the
-baked pair, so each checkpoint has its own folder on the Hub:
+and the streaming server only need codes + transcript; the `cpu/` C engine and
+`load_official_prompt` (either engine) also consume the baked pair, so each
+checkpoint has its own folder on the Hub:
 
     prompts/                 baked for vui-nano (also the .wav sources + legacy .txt)
     prompts/vui-nano-1.1/    baked for vui-nano-1.1
@@ -96,11 +96,11 @@ def load_official_prompt(
 ) -> tuple[str, Tensor, Tensor, Tensor | None]:
     """Returns (transcript, codes (T,Q) long, spk_token (1,1,d), cond_bias|None) as torch tensors.
 
-    The CUDA counterpart of `vui.mlx.engine.load_official_prompt`: set
-    `engine.cond_bias = cond_bias` and prefill with `spk_emb=spk_token`.
-    `spk_token_emb` / `cond_bias` are checkpoint-specific, so pass the
-    engine's `checkpoint` to download the set baked for it; `prompt_dir`
-    reads a local `<voice>.safetensors` instead.
+    For either engine: `row.prefill([Segment(transcript, codes)],
+    spk_emb=spk_token, cond_bias=cond_bias)`. `spk_token_emb` / `cond_bias`
+    are checkpoint-specific, so pass the engine's `checkpoint` to download
+    the set baked for it; `prompt_dir` reads a local `<voice>.safetensors`
+    instead.
     """
     from safetensors.torch import load_file
 

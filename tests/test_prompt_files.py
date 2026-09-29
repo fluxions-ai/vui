@@ -2,6 +2,7 @@
 
 import json
 
+import numpy as np
 import pytest
 import torch
 from safetensors.torch import save_file
@@ -48,3 +49,18 @@ def test_a_prompt_without_a_transcript_is_refused(tmp_path):
 
     with pytest.raises(FileNotFoundError, match="no transcript"):
         load_official_prompt("maeve", prompt_dir=tmp_path)
+
+
+def test_the_mlx_loader_returns_the_same_prompt_as_mlx_arrays(tmp_path):
+    mx = pytest.importorskip("mlx.core")
+    from vui.mlx.engine import load_official_prompt as load_mlx
+
+    _write_prompt(tmp_path, "maeve")
+
+    text, codes, spk_token, cond_bias = load_official_prompt("maeve", prompt_dir=tmp_path)
+    m_text, m_codes, m_spk, m_bias = load_mlx("maeve", prompt_dir=tmp_path)
+
+    assert m_text == text
+    assert m_codes.dtype == mx.int32 and np.array_equal(np.array(m_codes), codes.numpy())
+    assert np.array_equal(np.array(m_spk), spk_token.numpy())
+    assert np.array_equal(np.array(m_bias), cond_bias.numpy())

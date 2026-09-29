@@ -87,14 +87,13 @@ def test_official_voice():
     text, codes, spk_token, cond_bias = load_official_prompt(
         "maeve", checkpoint=engine.checkpoint
     )
-    engine.cond_bias = cond_bias
     try:
         with engine.new_row() as row:
-            row.prefill([Segment(text=text, codes=codes)], spk_emb=spk_token)
+            row.prefill([Segment(text, codes)], spk_emb=spk_token, cond_bias=cond_bias)
             assert torch.equal(row._spk_token, spk_token.to(engine.device, engine.dtype))
             codes_out, audio = row.render("Hello!", GenConfig(temperature=0.7))
     finally:
-        engine.cond_bias = None
+        engine.set_conditioning()  # the bias is engine-wide; zero it for the next blocks
     assert codes_out.dim() == 2 and audio.shape[-1] > 0
     AudioEncoder(audio.squeeze().cpu().float().unsqueeze(0), sample_rate=SR) \
         .to_file(str(OUT_DIR / "official_voice.wav"))

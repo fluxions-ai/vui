@@ -31,32 +31,20 @@ def load_official_prompt(
     prompt_dir: str | None = None,
     checkpoint: str | None = None,
 ) -> tuple[str, mx.array, mx.array, mx.array | None]:
-    """Returns (transcript, codes (T,Q) int32, spk_token (1,1,d), cond_bias|None).
+    """`vui.prompt_files.load_official_prompt` as MLX arrays (codes int32).
 
-    `prompt_dir` reads a local <voice>.safetensors; by default the pre-baked
-    set is downloaded from the HF repo — from the folder baked for `checkpoint`
-    (`vui.prompt_files.prompt_folder`), since `spk_token_emb` / `cond_bias`
-    are checkpoint-specific. The transcript comes from the safetensors
-    metadata (legacy files: sibling `.txt`). No torch codec encoder is needed
-    for the official voices.
+    The MLX row takes the torch tensors too; this is for the lower-level
+    `vui.mlx.tts` primitives.
     """
-    from vui.prompt_files import hub_prompt, hub_prompt_transcript, prompt_transcript
+    from vui.prompt_files import load_official_prompt as _load
 
-    if prompt_dir:
-        st_path = f"{prompt_dir}/{voice}.safetensors"
-        text = prompt_transcript(st_path)
-        if not text:
-            raise FileNotFoundError(f"no transcript for {st_path} (metadata or sibling .txt)")
-    else:
-        st_path = hub_prompt(voice, checkpoint)
-        text = hub_prompt_transcript(voice, st_path)
-    st = mx.load(st_path)
-    codes = st["codes"].astype(mx.int32)  # (T, Q)
-    spk_token = st["spk_token_emb"].astype(mx.float32)  # (1, 1, d) pre-projected
-    cond_bias = st.get("cond_bias")
-    if cond_bias is not None:
-        cond_bias = cond_bias.astype(mx.float32)
-    return text, codes, spk_token, cond_bias
+    text, codes, spk_token, cond_bias = _load(voice, prompt_dir, checkpoint)
+    return (
+        text,
+        _to_mx_codes(codes),
+        _to_mx_float(spk_token),
+        _to_mx_float(cond_bias) if cond_bias is not None else None,
+    )
 
 
 def _to_mx_codes(codes) -> mx.array:
@@ -66,6 +54,15 @@ def _to_mx_codes(codes) -> mx.array:
     if isinstance(codes, torch.Tensor):
         codes = codes.detach().cpu().numpy()
     return mx.array(np.asarray(codes).astype(np.int32))
+
+
+def _to_mx_float(x) -> mx.array:
+    """torch / numpy / mx float -> mx float32."""
+    if isinstance(x, mx.array):
+        return x.astype(mx.float32)
+    if isinstance(x, torch.Tensor):
+        x = x.detach().float().cpu().numpy()
+    return mx.array(np.asarray(x, dtype=np.float32))
 
 
 def _audio_to_torch(audio_mx: mx.array) -> torch.Tensor:
@@ -92,10 +89,12 @@ class MLXRow:
     def offset(self) -> int:
         return self._engine.model.decoder.cache_T
 
-    def prefill(self, segments, spk_emb=None, segments_2=None, spk_emb_2=None) -> int:
+    def prefill(
+        self, segments, spk_emb=None, segments_2=None, spk_emb_2=None, *, cond_bias=None
+    ) -> int:
         if segments_2 is not None or spk_emb_2 is not None:
             raise NotImplementedError("two-speaker prefill is CUDA-only")
-        return self._engine._prefill_row(self, segments, spk_emb)
+        return self._engine._prefill_row(self, segments, spk_emb, cond_bias)
 
     def add_user(self, text: str = "", codes=None, *, final: bool = True) -> int:
         return self._engine._add_user(self, text, codes, final=final)
@@ -249,17 +248,17 @@ class MLXEngine:
         self.model.decoder(sc)
         mx.eval([c.state for c in self.model.decoder.kv_caches])
 
-    def _prefill_row(self, row: MLXRow, segments, spk_emb) -> int:
+    def _prefill_row(self, row: MLXRow, segments, spk_emb, cond_bias=None) -> int:
         """[spk] text_i codes_i per segment, [SC] on the last text — matches
         the CUDA engine's _prefill_speaker_segments(final=True)."""
         ctx = self._ctx
         ctx._ensure_cache()
+        if cond_bias is not None:
+            self.cond_bias = _to_mx_float(cond_bias).reshape(1, 1, -1)
 
         spk_token = None
         if spk_emb is not None:
-            emb = spk_emb if isinstance(spk_emb, mx.array) else mx.array(
-                spk_emb.detach().float().cpu().numpy()
-            )
+            emb = _to_mx_float(spk_emb)
             if emb.ndim == 3 and emb.shape[-1] == self.D:
                 spk_token = emb  # pre-projected token (official prompts)
             elif self.model.spk_proj is not None:

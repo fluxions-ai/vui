@@ -52,7 +52,7 @@ AudioEncoder(audio.squeeze().cpu().float().unsqueeze(0), sample_rate=SR) \
 
 ## Official voices (no encoder needed)
 
-The official voices (`maeve`, `abraham`, `rhian`, `harry`) ship pre-baked for each checkpoint: codes, transcript, a speaker token already projected for the model, and a conditioning bias. `vui.prompt_files.load_official_prompt` downloads the set baked for your engine's checkpoint and returns them as torch tensors; the speaker token goes to `prefill` as `spk_emb` (a `(1, 1, d_model)` tensor is used as is, not projected again):
+The official voices (`maeve`, `abraham`, `rhian`, `harry`) ship pre-baked for each checkpoint: transcript, codes, speaker token and conditioning bias. `load_official_prompt` downloads the set baked for your engine's checkpoint, and `prefill` takes all four:
 
 ```python
 from vui.engine import Engine, GenConfig, Segment
@@ -60,13 +60,12 @@ from vui.prompt_files import load_official_prompt
 
 engine = Engine()
 text, codes, spk_token, cond_bias = load_official_prompt("maeve", checkpoint=engine.checkpoint)
-engine.cond_bias = cond_bias
 with engine.new_row() as row:
-    row.prefill([Segment(text=text, codes=codes)], spk_emb=spk_token)
+    row.prefill([Segment(text, codes)], spk_emb=spk_token, cond_bias=cond_bias)
     codes_out, audio = row.render("Hello!", GenConfig(temperature=0.7))
 ```
 
-On Apple Silicon use `vui.mlx.engine.load_official_prompt`, which returns MLX arrays (see [below](#apple-silicon-mlx)).
+The speaker token and bias only fit the checkpoint they were baked for, hence `checkpoint=engine.checkpoint`. The bias is engine-wide: with several rows, the last prefill that passes one sets it for all of them. This runs unchanged on Apple Silicon.
 
 ## Properly chunked prompts (long voice references)
 
@@ -250,24 +249,11 @@ The `ctx=6` parameter prepends 6 frames (~500ms) of codec context to smooth chun
 
 **Status:** TTS inference on MLX is working — quantized vui-nano-1.1 renders voice-prompted speech end-to-end at ~1.5× real-time on M4, and `load_quantized` auto-downloads the pre-baked int8/int4 weights (no torch float32-load-and-quantize step; torch is still used to encode prompt audio). The wider MLX stack (ASR, streaming-server integration) is still WIP.
 
-**`Engine()` works here.** On a machine without CUDA, `Engine()` returns `vui.mlx.engine.MLXEngine`, which implements the same Row API (`prefill` / `add_user` / `render` / `stream` / `rewind` / `reset`) backed by MLX — so the minimal example above runs unchanged. What differs from the CUDA engine:
+**`Engine()` works here.** On a machine without CUDA, `Engine()` returns `vui.mlx.engine.MLXEngine`, which implements the same Row API (`prefill` / `add_user` / `render` / `stream` / `rewind` / `reset` / `truncate`) backed by MLX — so the minimal and [official-voice](#official-voices-no-encoder-needed) examples above run unchanged. What differs from the CUDA engine:
 
 - **Single row only.** `max_rows` must be 1; continuous batching (`render_continuous` / `render_all`) and two-speaker prefill are CUDA-only.
 - **No gates.** The entropy gate (`gate_frames`) and babble probe gate aren't wired up; those `GenConfig` fields are ignored. Repetition-penalty state is per-chunk rather than per-render-call.
 - **Precision.** Loads int8 quantized weights by default (`VUI_MLX_PRECISION=float32|int8|int4` to override); the pre-baked weights auto-download on first run.
-- **Official voices need no torch encoder.** `vui.mlx.engine.load_official_prompt("maeve")` returns `(transcript, codes, spk_token, cond_bias)` from the pre-baked HF prompt safetensors:
-
-```python
-from vui.engine import Engine, GenConfig, Segment
-from vui.mlx.engine import load_official_prompt
-
-engine = Engine()
-text, codes, spk_token, cond_bias = load_official_prompt("maeve")
-engine.cond_bias = cond_bias
-with engine.new_row() as row:
-    row.prefill([Segment(text=text, codes=codes)], spk_emb=spk_token)
-    codes_out, audio = row.render("Hello!", GenConfig(temperature=0.7))
-```
 
 For arbitrary voice prompts, build segments with `build_prompt_segments` as on CUDA — encoding prompt audio still uses the torch codec encoder (CPU is fine). The lower-level primitives (`vui.mlx.tts.generate`, `vui.mlx.tts.stream.TTSStream`) remain available for custom loops.
 

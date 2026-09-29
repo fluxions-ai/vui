@@ -197,6 +197,8 @@ class Row:
         spk_emb: Tensor | None = None,
         segments_2: list[Segment] | None = None,
         spk_emb_2: Tensor | None = None,
+        *,
+        cond_bias: Tensor | None = None,
     ) -> int:
         """Prefill this row with `[spk] text_i codes_i` for each segment.
 
@@ -206,12 +208,18 @@ class Row:
         `spk_token_emb` an official prompt ships — and used as is, as the
         MLX engine does.
 
+        `cond_bias` is the prompt's baked conditioning bias. It is
+        engine-wide: every row renders with the last one passed. None leaves
+        it as it is.
+
         For two-speaker conversations, pass `segments_2` + `spk_emb_2`; both
         speakers are prefilled in order, and the stream/render loop alternates
         between them on each `[SC]` chunk. Sets self._prompt_offset to the
         new offset (used by rewind()).
         """
-        return self._engine._prefill_row(self, segments, spk_emb, segments_2, spk_emb_2)
+        return self._engine._prefill_row(
+            self, segments, spk_emb, segments_2, spk_emb_2, cond_bias=cond_bias
+        )
 
     def add_user(
         self, text: str = "", codes: Tensor | None = None, *, final: bool = True
@@ -803,23 +811,6 @@ class Engine:
         self.model.set_cond_bias(sq_scores=sq_scores, wps_score=wps_score)
         self._cond_bias = self.model._cond_bias
 
-    @property
-    def cond_bias(self) -> Tensor:
-        """The (1, 1, d_model) bias added to agent text embeddings.
-
-        Assign an official prompt's baked `cond_bias` to it (None zeroes it),
-        as on MLX. The value is copied into the model's buffer in place.
-        """
-        return self._cond_bias
-
-    @cond_bias.setter
-    def cond_bias(self, bias: Tensor | None) -> None:
-        with torch.inference_mode():
-            if bias is None:
-                self._cond_bias.zero_()
-            else:
-                self._cond_bias.copy_(bias.reshape(1, 1, -1))
-
     # ------------------------------------------------------------------
     # Prefill (shared between prompt, user, and agent)
     # ------------------------------------------------------------------
@@ -896,6 +887,8 @@ class Engine:
         spk_emb: Tensor | None,
         segments_2: list[Segment] | None = None,
         spk_emb_2: Tensor | None = None,
+        *,
+        cond_bias: Tensor | None = None,
     ) -> int:
         """Prefill [spk] text codes ... into a row, starting from its current offset.
 
@@ -927,6 +920,8 @@ class Engine:
             row._prompt_codes = None
 
         with torch.inference_mode(), sdpa_kernel([SDPBackend.MATH]):
+            if cond_bias is not None:
+                self._cond_bias.copy_(cond_bias.reshape(1, 1, -1))
             # Always end each speaker's block with [SC] before its last audio:
             # matches training (streamed_tts) where [SC] is appended to a turn's
             # text whenever the next turn is a different speaker. For speaker 1

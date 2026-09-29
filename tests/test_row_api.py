@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vui.engine import Engine, Row
+from vui.engine import Engine, Row, Segment
 
 Q = 16
 
@@ -134,41 +134,6 @@ def test_a_raw_embedding_gives_no_token_without_a_projection():
     assert engine._embed_speaker(torch.randn(SPK_DIM)) is None
 
 
-# --------------------------------------------------------------- cond_bias
-
-
-class _FakeBiasEngine:
-    cond_bias = Engine.cond_bias
-
-    def __init__(self, inference_buffer: bool = False):
-        if inference_buffer:  # the model's buffer when built under inference_mode
-            with torch.inference_mode():
-                self._cond_bias = torch.zeros(1, 1, D, dtype=torch.bfloat16)
-        else:
-            self._cond_bias = torch.zeros(1, 1, D, dtype=torch.bfloat16)
-
-
-@pytest.mark.parametrize("inference_buffer", [False, True])
-def test_setting_cond_bias_copies_into_the_model_buffer(inference_buffer):
-    engine = _FakeBiasEngine(inference_buffer)
-    buffer = engine._cond_bias
-    baked = torch.randn(D)
-
-    engine.cond_bias = baked
-
-    assert engine.cond_bias is buffer
-    assert torch.equal(buffer, baked.reshape(1, 1, D).to(torch.bfloat16))
-
-
-def test_setting_cond_bias_to_none_zeroes_it():
-    engine = _FakeBiasEngine()
-    engine.cond_bias = torch.ones(1, 1, D)
-
-    engine.cond_bias = None
-
-    assert not engine.cond_bias.any()
-
-
 # ---------------------------------------------------------------- add_user
 
 
@@ -202,3 +167,61 @@ def test_a_user_turn_is_logged_at_debug_level_not_printed(capsys, caplog):
     assert row.offset == 4 + 1 + 5
     assert capsys.readouterr().out == ""
     assert "T=0->10" in caplog.text
+
+
+# ------------------------------------------------------------------ prefill
+
+
+class _FakePrefillEngine(_FakeUserEngine):
+    """The prefill path over the fake KV: speaker token, segments, cond_bias."""
+
+    _prefill_row = Engine._prefill_row
+    _prefill_speaker_segments = Engine._prefill_speaker_segments
+    _embed_speaker = Engine._embed_speaker
+
+    def __init__(self, inference_buffer: bool = False):
+        super().__init__()
+        self.D = D
+        self.dtype = torch.bfloat16
+        self.model.spk_proj = None
+        if inference_buffer:  # the model's buffer when built under inference_mode
+            with torch.inference_mode():
+                self._cond_bias = torch.zeros(1, 1, D, dtype=torch.bfloat16)
+        else:
+            self._cond_bias = torch.zeros(1, 1, D, dtype=torch.bfloat16)
+
+
+def _prefill(engine, **kw) -> Row:
+    """Two segments of 2 text tokens + 3 frames each."""
+    row = Row(engine, 0)
+    row.prefill([Segment("one two", torch.zeros(3, Q, dtype=torch.long))] * 2, **kw)
+    return row
+
+
+def test_a_pre_projected_token_is_written_before_each_prompt_segment():
+    with_token = _prefill(_FakePrefillEngine(), spk_emb=torch.randn(1, 1, D))
+    without = _prefill(_FakePrefillEngine())
+
+    assert with_token.offset - without.offset == 2
+    assert with_token._prompt_offset == with_token.offset
+
+
+@pytest.mark.parametrize("inference_buffer", [False, True])
+def test_prefill_copies_the_cond_bias_into_the_engine_buffer(inference_buffer):
+    engine = _FakePrefillEngine(inference_buffer)
+    buffer = engine._cond_bias
+    baked = torch.randn(1, 1, D)
+
+    _prefill(engine, cond_bias=baked)
+
+    assert engine._cond_bias is buffer
+    assert torch.equal(buffer, baked.to(torch.bfloat16))
+
+
+def test_prefill_without_a_cond_bias_leaves_it():
+    engine = _FakePrefillEngine()
+    engine._cond_bias.fill_(1.0)
+
+    _prefill(engine)
+
+    assert (engine._cond_bias == 1).all()
