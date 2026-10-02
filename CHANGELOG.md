@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-10-02
+
+### Added
+
+- **Any OpenAI-compatible API as the LLM, hosted ones included.**
+  `VUI_LLM_BACKEND=openai` with `VUI_OPENAI_URL`, `VUI_OPENAI_MODEL` and
+  `VUI_OPENAI_API_KEY` points Vui at OpenRouter, OrcaRouter, Gemini or any
+  other OpenAI-compatible server. `vllm`, `litellm` and `openai` are now one
+  client with different defaults, and each takes `VUI_<NAME>_API_KEY` (sent
+  as a bearer token) and `VUI_<NAME>_REASONING_EFFORT`. The URL can be a bare
+  host or the API root the provider documents (`…/v1`, `…/v1beta/openai`).
+
+### Changed
+
+- The OpenAI-compatible backends no longer send a body only vLLM-style
+  servers accept. A 400 before vLLM's sampling fields have ever worked gets
+  one retry with standard fields and the first four stop sequences, and the
+  backend stays that way; the remaining stop sequences are applied to the
+  reply as it streams. Gemini rejected every request before.
+- A prefill of a system prompt alone adds a placeholder user turn, which
+  Gemini and Qwen3.5's chat template require.
+- `litellm` now probes the proxy's `/v1/models` for the health pill instead of
+  reporting healthy unconditionally.
+
 ## [1.2.1] - 2026-10-02
 
 ### Changed

@@ -175,7 +175,7 @@ Point at a different LLM backend via env vars in the shell that runs `python -m 
 export VUI_OLLAMA_URL="http://gpu-box.lan:11434"   # bare OLLAMA_URL also works
 export VUI_OLLAMA_MODEL="qwen3:8b"                 # initial model (UI can switch live)
 ```
-vLLM and other OpenAI-compatible backends are also supported (`VUI_LLM_BACKEND=vllm` + `VUI_VLLM_URL=…`); see [`docs/configuration.md`](docs/configuration.md#custom-model-server).
+vLLM (`VUI_LLM_BACKEND=vllm` + `VUI_VLLM_URL=…`) and any OpenAI-compatible API, hosted ones included (`VUI_LLM_BACKEND=openai` + `VUI_OPENAI_URL`, `VUI_OPENAI_MODEL`, `VUI_OPENAI_API_KEY`), are also supported; see [`docs/configuration.md`](docs/configuration.md#custom-model-server).
 
 **Apple Silicon — MLX auto-setup (~1.9× faster decode, recommended):**
 On first run the server auto-creates `qwen3.5-4b-mlx` via `ollama create --experimental --quantize int4` (~37 tok/s decode vs ~19 tok/s for GGUF Q4 on the same 4B model). Falls back to `qwen3.5:4b` GGUF if MLX setup fails. `--experimental` is required — without it Ollama converts to GGUF and you lose the speedup.

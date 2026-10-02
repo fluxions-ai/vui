@@ -181,7 +181,7 @@ def _check_llm(rep: Report) -> None:
 
         backend = get_backend()
     except ValueError as e:
-        rep.add(FAIL, "llm", str(e), "Set VUI_LLM_BACKEND to 'ollama' or 'vllm'.")
+        rep.add(FAIL, "llm", str(e), "Set VUI_LLM_BACKEND to 'ollama', 'vllm', 'openai' or 'litellm'.")
         return
     except Exception as e:
         rep.add(WARN, "llm", f"backend not resolvable: {e}")
