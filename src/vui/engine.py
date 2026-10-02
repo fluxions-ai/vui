@@ -210,7 +210,8 @@ class Row:
 
         `cond_bias` is the prompt's baked conditioning bias. It is
         engine-wide: every row renders with the last one passed. None leaves
-        it as it is.
+        it as it is, so a cloned voice prefilled after an official one keeps
+        the official bias; `set_conditioning()` with no arguments zeroes it.
 
         For two-speaker conversations, pass `segments_2` + `spk_emb_2`; both
         speakers are prefilled in order, and the stream/render loop alternates

@@ -65,7 +65,7 @@ with engine.new_row() as row:
     codes_out, audio = row.render("Hello!", GenConfig(temperature=0.7))
 ```
 
-The speaker token and bias only fit the checkpoint they were baked for, hence `checkpoint=engine.checkpoint`. The bias is engine-wide: with several rows, the last prefill that passes one sets it for all of them. This runs unchanged on Apple Silicon.
+The speaker token and bias only fit the checkpoint they were baked for, hence `checkpoint=engine.checkpoint`. The bias is engine-wide: with several rows, the last prefill that passes one sets it for all of them. A prefill without one keeps it, so call `engine.set_conditioning()` to zero it before switching to a cloned voice. This runs unchanged on Apple Silicon.
 
 ## Properly chunked prompts (long voice references)
 
