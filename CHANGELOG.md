@@ -34,6 +34,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `vui.engine` logger at DEBUG level, so an application embedding the engine
   keeps transcripts out of its output unless it asks for them.
 
+### Fixed
+
+- **CUDA: user audio counts towards the codec decoder's 10 s clock** (#42).
+  `Row.add_user(codes=...)` put the user's codes in the codec context without
+  decoding them or advancing the clock that restarts the decoder every 10 s.
+  In a conversation kept in one row, each reply after a user turn was decoded
+  on top of the previous reply's tail, and the restarts drifted off the 10 s
+  grid the codes were encoded on. The open decoder state now runs over user
+  codes as they are added, and `prefill` aligns to a count of every frame in
+  the stream instead of the length of the trimmed buffer. Every reply now
+  decodes as the whole conversation does in independent 10 s chunks. Time to
+  first frame is unchanged; `add_user` with codes takes up to ~35 ms longer on
+  an RTX 4090. The streaming server adds user audio while the user speaks, so
+  only the last chunk is on the reply's path.
+
 ## [1.1.4] - 2026-09-12
 
 ### Added
