@@ -11,15 +11,17 @@ format, thinking-mode flag) into a uniform API:
     backend.prefill(messages) -> None                      # warm KV (default = complete max_tokens=1)
 
 Pick at startup via env:
-    VUI_LLM_BACKEND=ollama|vllm|litellm
-    VUI_OLLAMA_URL / VUI_VLLM_URL / VUI_LITELLM_URL
-    VUI_OLLAMA_MODEL / VUI_VLLM_MODEL / VUI_LITELLM_MODEL
+    VUI_LLM_BACKEND=ollama|vllm|litellm|openai
+    VUI_OLLAMA_URL / VUI_VLLM_URL / VUI_LITELLM_URL / VUI_OPENAI_URL
+    VUI_OLLAMA_MODEL / VUI_VLLM_MODEL / VUI_LITELLM_MODEL / VUI_OPENAI_MODEL
+    VUI_{VLLM,LITELLM,OPENAI}_API_KEY, VUI_{VLLM,LITELLM,OPENAI}_REASONING_EFFORT
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import AsyncIterator
 
 import httpx
@@ -389,26 +391,73 @@ class OllamaBackend(LLMBackend):
                     continue
 
 
-class VLLMBackend(LLMBackend):
-    name = "vllm"
+# Ceiling on stop sequences a strict API takes: OpenAI's limit is 4, Gemini's 5.
+STANDARD_MAX_STOP = 4
+
+
+def _api_root(url: str) -> str:
+    """The provider's documented base URL, or a bare host that gets `/v1`.
+
+    `http://host:8000` and `https://openrouter.ai/api` gain `/v1`;
+    `https://api.example.com/v1` and Gemini's `.../v1beta/openai` are used as is.
+    """
+    url = url.rstrip("/")
+    return url if re.search(r"/v\d[\w.]*(/openai)?$", url) else url + "/v1"
+
+
+def _stop_scan(buf: str, stops: list[str]) -> tuple[str, str, bool]:
+    """Split streamed text into (emit, hold back, stopped) for client-side stops.
+
+    Holds back only a tail that could still grow into a stop sequence, so text
+    that can't is emitted at once.
+    """
+    cut = min((i for s in stops if (i := buf.find(s)) >= 0), default=-1)
+    if cut >= 0:
+        return buf[:cut], "", True
+    hold = max(
+        (k for s in stops for k in range(1, len(s)) if buf.endswith(s[:k])), default=0
+    )
+    return buf[: len(buf) - hold], buf[len(buf) - hold :], False
+
+
+class OpenAICompatBackend(LLMBackend):
+    """Any server that speaks the OpenAI chat-completions API.
+
+    With `extras`, the body carries vLLM's sampling fields (`top_p`, `top_k`,
+    `presence_penalty`, `chat_template_kwargs`) and every stop sequence, which
+    vLLM, sglang, llama.cpp and mlx_lm accept. Hosted APIs reject some of them
+    with a 400 (Gemini: `top_k`, `presence_penalty`, more than 5 stops), so
+    until a request with the extras has succeeded, a 400 or 422 gets one retry
+    with standard fields only and at most `STANDARD_MAX_STOP` stops, and the
+    backend stays that way. Stops cut from the request are applied here.
+    """
+
+    name = "openai"
     # A real vLLM serves one model per process, so list_models() returns a
-    # single id and the dropdown is effectively fixed. But this backend is also
-    # the generic OpenAI-compatible one (sglang, LM Studio, LiteLLM, a router),
-    # where several models may be served — so allow the switch and validate it.
+    # single id and the dropdown is effectively fixed. A router serves many —
+    # so allow the switch and validate it against what's served.
     supports_model_switch = True
     supports_pull = False
 
     def __init__(
         self,
-        model: str = DEFAULT_VLLM_MODEL,
-        base_url: str = "http://localhost:8000",
+        model: str,
+        base_url: str,
         *,
+        api_key: str | None = None,
+        extras: bool = True,
         enable_thinking: bool = False,
+        reasoning_effort: str | None = None,
         max_model_len: int = 8192,
         sampling: dict | None = None,
     ):
         super().__init__(model=model, base_url=base_url, sampling=sampling)
+        self._root = _api_root(base_url)
+        self._headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self._extras = extras
+        self._extras_ok = False
         self.enable_thinking = enable_thinking
+        self.reasoning_effort = reasoning_effort
         self.max_model_len = max_model_len
 
     def _body(
@@ -436,19 +485,53 @@ class VLLMBackend(LLMBackend):
             "stream": stream,
             "max_tokens": max_tokens,
             "temperature": s["temperature"],
-            "top_p": s["top_p"],
-            "presence_penalty": s["presence_penalty"],
+        }
+        if self._extras:
+            body["top_p"] = s["top_p"]
+            body["presence_penalty"] = s["presence_penalty"]
             # vLLM exposes top_k via extra_body when using OpenAI client; the
             # raw HTTP API accepts it at the top level.
-            "top_k": s["top_k"],
+            body["top_k"] = s["top_k"]
             # Qwen3 has chain-of-thought on by default; voice TTFB needs it off.
-            "chat_template_kwargs": {"enable_thinking": self.enable_thinking},
-        }
+            body["chat_template_kwargs"] = {"enable_thinking": self.enable_thinking}
+        if self.reasoning_effort:
+            body["reasoning_effort"] = self.reasoning_effort
         if stop:
-            body["stop"] = stop
+            body["stop"] = stop if self._extras else stop[:STANDARD_MAX_STOP]
         if tools:
             body["tools"] = tools
+        if stream:
+            # A final chunk with usage stats, so callers can update ctx fills
+            # the same way ollama provides them on `done`.
+            body["stream_options"] = {"include_usage": True}
         return body
+
+    def _client_stops(self, stop: list[str] | None) -> list[str]:
+        """Stop sequences the request couldn't carry, applied to the reply here."""
+        return [] if self._extras or not stop else stop[STANDARD_MAX_STOP:]
+
+    def _drop_extras(self, sent_extras: bool, resp: httpx.Response, error: str) -> bool:
+        """Switch to standard fields if this 400 may be the extras' fault."""
+        if not sent_extras or self._extras_ok or resp.status_code not in (400, 422):
+            return False
+        # A concurrent request may have switched already; this one retries too.
+        if self._extras:
+            self._extras = False
+            print(
+                f"[llm] {self._root} rejected a request with vLLM's sampling fields "
+                f"({resp.status_code}: {' '.join(error.split())[:200]}); "
+                "using standard OpenAI fields",
+                flush=True,
+            )
+        return True
+
+    async def prefill(self, messages: list[dict]) -> None:
+        # Gemini and templates that need a user turn (Qwen3.5) reject a
+        # system-only conversation. A placeholder turn after it leaves the
+        # system prefix, the part worth caching, unchanged.
+        if not any(m.get("role") == "user" for m in messages):
+            messages = messages + [{"role": "user", "content": "."}]
+        await super().prefill(messages)
 
     def _record_stats(self, stats: dict | None, usage: dict | None):
         if stats is None or not usage:
@@ -472,42 +555,60 @@ class VLLMBackend(LLMBackend):
         stop: list[str] | None = None,
         stats: dict | None = None,
     ) -> AsyncIterator[str]:
-        body = self._body(
-            messages,
-            stream=True,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            presence_penalty=presence_penalty,
-            stop=stop,
-        )
-        # Ask vLLM to emit a final chunk with usage stats so callers can
-        # update ctx fills the same way ollama provides them on `done`.
-        body["stream_options"] = {"include_usage": True}
         client = self._client_inst()
-        async with client.stream(
-            "POST", f"{self.base_url}/v1/chat/completions", json=body
-        ) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                payload = line[6:].strip()
-                if payload == "[DONE]":
-                    return
-                try:
-                    d = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                choices = d.get("choices") or []
-                if choices:
-                    delta = choices[0].get("delta") or {}
-                    tok = delta.get("content") or ""
-                    if tok:
-                        yield tok
-                if "usage" in d:
-                    self._record_stats(stats, d.get("usage"))
+        while True:
+            sent_extras = self._extras
+            body = self._body(
+                messages,
+                stream=True,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                presence_penalty=presence_penalty,
+                stop=stop,
+            )
+            client_stops = self._client_stops(stop)
+            async with client.stream(
+                "POST",
+                f"{self._root}/chat/completions",
+                json=body,
+                headers=self._headers,
+            ) as resp:
+                if resp.is_error:
+                    error = (await resp.aread()).decode(errors="replace")
+                    if self._drop_extras(sent_extras, resp, error):
+                        continue
+                    resp.raise_for_status()
+                self._extras_ok = self._extras_ok or sent_extras
+                held = ""
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        d = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = d.get("choices") or []
+                    if choices:
+                        delta = choices[0].get("delta") or {}
+                        tok = delta.get("content") or ""
+                        if tok and client_stops:
+                            tok, held, stopped = _stop_scan(held + tok, client_stops)
+                            if stopped:
+                                if tok:
+                                    yield tok
+                                return
+                        if tok:
+                            yield tok
+                    if d.get("usage"):
+                        self._record_stats(stats, d.get("usage"))
+                if held:
+                    yield held
+                return
 
     async def complete(
         self,
@@ -522,20 +623,29 @@ class VLLMBackend(LLMBackend):
         stop: list[str] | None = None,
         stats: dict | None = None,
     ) -> dict:
-        body = self._body(
-            messages,
-            stream=False,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            presence_penalty=presence_penalty,
-            stop=stop,
-            tools=tools,
-        )
         client = self._client_inst()
-        resp = await client.post(f"{self.base_url}/v1/chat/completions", json=body)
-        resp.raise_for_status()
+        while True:
+            sent_extras = self._extras
+            body = self._body(
+                messages,
+                stream=False,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                presence_penalty=presence_penalty,
+                stop=stop,
+                tools=tools,
+            )
+            client_stops = self._client_stops(stop)
+            resp = await client.post(
+                f"{self._root}/chat/completions", json=body, headers=self._headers
+            )
+            if resp.is_error and self._drop_extras(sent_extras, resp, resp.text):
+                continue
+            resp.raise_for_status()
+            self._extras_ok = self._extras_ok or sent_extras
+            break
         d = resp.json()
         choice = (d.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
@@ -558,8 +668,12 @@ class VLLMBackend(LLMBackend):
                         fn["arguments"] = {}
                 normalised.append({**tc, "function": fn})
             tool_calls = normalised
+        content = msg.get("content", "") or ""
+        if client_stops:
+            emit, held, _ = _stop_scan(content, client_stops)
+            content = emit + held
         return {
-            "content": msg.get("content", "") or "",
+            "content": content,
             "tool_calls": tool_calls,
             "usage": {
                 "prompt": usage.get("prompt_tokens", 0),
@@ -572,32 +686,38 @@ class VLLMBackend(LLMBackend):
         }
 
     async def health(self) -> bool:
-        # /v1/models rather than /health: portable across every
+        # /models rather than /health: portable across every
         # OpenAI-compatible server. 401/403 still prove one is listening — but
         # a 404 means whatever is on this port isn't an OpenAI-compatible API,
         # which is a misconfiguration, not a healthy backend.
         try:
-            r = await self._client_inst().get(f"{self.base_url}/v1/models", timeout=3)
+            r = await self._client_inst().get(
+                f"{self._root}/models", headers=self._headers, timeout=3
+            )
             return r.status_code in (200, 401, 403)
         except Exception:
             return False
 
-    async def list_models(self) -> list[str]:
-        client = self._client_inst()
+    async def _served(self) -> list[str] | None:
         try:
-            r = await client.get(f"{self.base_url}/v1/models", timeout=5)
+            r = await self._client_inst().get(
+                f"{self._root}/models", headers=self._headers, timeout=5
+            )
             r.raise_for_status()
             return [m.get("id", "") for m in r.json().get("data", []) if m.get("id")]
         except Exception:
-            return [self.model]
+            return None
+
+    async def list_models(self) -> list[str]:
+        return await self._served() or [self.model]
 
     async def loaded_models(self) -> list[str]:
         # Whatever it serves is loaded — there's no separate resident set.
         return await self.list_models()
 
     async def set_model(self, name: str) -> None:
-        served = await self.list_models()
-        if name not in served:
+        served = await self._served()
+        if served and name not in served:
             raise ValueError(
                 f"{name!r} is not served by this endpoint (has: {', '.join(served)}). "
                 "vLLM serves one model per process — restart it with --model to change."
@@ -605,8 +725,24 @@ class VLLMBackend(LLMBackend):
         self.model = name
 
 
-class LiteLLMBackend(LLMBackend):
-    """Backend for LiteLLM proxy — routes to 100+ LLM providers."""
+class VLLMBackend(OpenAICompatBackend):
+    name = "vllm"
+
+    def __init__(
+        self,
+        model: str = DEFAULT_VLLM_MODEL,
+        base_url: str = "http://localhost:8000",
+        **kwargs,
+    ):
+        super().__init__(model, base_url, **kwargs)
+
+
+class LiteLLMBackend(OpenAICompatBackend):
+    """Backend for LiteLLM proxy — routes to 100+ LLM providers.
+
+    Standard fields only: the proxy validates sampling fields against the
+    provider behind each route.
+    """
 
     name = "litellm"
 
@@ -614,177 +750,15 @@ class LiteLLMBackend(LLMBackend):
         self,
         model: str = "openai/gpt-4o-mini",
         base_url: str = "http://localhost:4000",
-        *,
-        sampling: dict | None = None,
+        **kwargs,
     ):
-        super().__init__(model=model, base_url=base_url, sampling=sampling)
-
-    def _body(
-        self,
-        messages,
-        *,
-        stream,
-        max_tokens,
-        temperature,
-        top_k,
-        top_p,
-        presence_penalty,
-        stop,
-        tools=None,
-    ) -> dict:
-        s = self._resolve_sampling(
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            presence_penalty=presence_penalty,
-        )
-        body: dict = {
-            "model": self.model,
-            "messages": messages,
-            "stream": stream,
-            "max_tokens": max_tokens,
-            "temperature": s["temperature"],
-        }
-        if stop:
-            body["stop"] = stop
-        if tools:
-            body["tools"] = tools
-        return body
-
-    def _record_stats(self, stats: dict | None, usage: dict | None):
-        if stats is None or not usage:
-            return
-        pt = usage.get("prompt_tokens", 0)
-        ct = usage.get("completion_tokens", 0)
-        stats["prompt_tokens"] = pt
-        stats["completion_tokens"] = ct
-        stats["ctx_used"] = pt + ct
-        stats["ctx_max"] = 0
-
-    async def stream(
-        self,
-        messages,
-        *,
-        max_tokens: int = 512,
-        temperature: float | None = None,
-        top_k: int | None = None,
-        top_p: float | None = None,
-        presence_penalty: float | None = None,
-        stop: list[str] | None = None,
-        stats: dict | None = None,
-    ) -> AsyncIterator[str]:
-        body = self._body(
-            messages,
-            stream=True,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            presence_penalty=presence_penalty,
-            stop=stop,
-        )
-        body["stream_options"] = {"include_usage": True}
-        client = self._client_inst()
-        async with client.stream(
-            "POST", f"{self.base_url}/v1/chat/completions", json=body
-        ) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                payload = line[6:].strip()
-                if payload == "[DONE]":
-                    return
-                try:
-                    d = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                choices = d.get("choices") or []
-                if choices:
-                    delta = choices[0].get("delta") or {}
-                    tok = delta.get("content") or ""
-                    if tok:
-                        yield tok
-                if "usage" in d:
-                    self._record_stats(stats, d.get("usage"))
-
-    async def complete(
-        self,
-        messages,
-        *,
-        max_tokens: int = 1024,
-        temperature: float | None = 0.0,
-        top_k: int | None = None,
-        top_p: float | None = None,
-        presence_penalty: float | None = None,
-        tools: list[dict] | None = None,
-        stop: list[str] | None = None,
-        stats: dict | None = None,
-    ) -> dict:
-        body = self._body(
-            messages,
-            stream=False,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            presence_penalty=presence_penalty,
-            stop=stop,
-            tools=tools,
-        )
-        client = self._client_inst()
-        resp = await client.post(f"{self.base_url}/v1/chat/completions", json=body)
-        resp.raise_for_status()
-        d = resp.json()
-        choice = (d.get("choices") or [{}])[0]
-        msg = choice.get("message") or {}
-        usage = d.get("usage") or {}
-        self._record_stats(stats, usage)
-        tool_calls = msg.get("tool_calls") or None
-        if tool_calls:
-            normalised = []
-            for tc in tool_calls:
-                fn = (tc.get("function") or {}).copy()
-                args = fn.get("arguments")
-                if isinstance(args, str):
-                    try:
-                        fn["arguments"] = json.loads(args) if args else {}
-                    except json.JSONDecodeError:
-                        fn["arguments"] = {}
-                normalised.append({**tc, "function": fn})
-            tool_calls = normalised
-        return {
-            "content": msg.get("content", "") or "",
-            "tool_calls": tool_calls,
-            "usage": {
-                "prompt": usage.get("prompt_tokens", 0),
-                "completion": usage.get("completion_tokens", 0),
-                "ctx_used": usage.get("prompt_tokens", 0)
-                + usage.get("completion_tokens", 0),
-                "ctx_max": 0,
-            },
-            "done_reason": choice.get("finish_reason"),
-        }
-
-    async def list_models(self) -> list[str]:
-        client = self._client_inst()
-        try:
-            r = await client.get(f"{self.base_url}/v1/models", timeout=5)
-            return [m.get("id", "") for m in r.json().get("data", []) if m.get("id")]
-        except Exception:
-            return [self.model]
-
-    async def set_model(self, name: str) -> None:
-        self.model = name
+        kwargs.setdefault("extras", False)
+        kwargs.setdefault("max_model_len", 0)
+        super().__init__(model, base_url, **kwargs)
 
 
 def make_backend(name: str | None = None, model: str | None = None) -> LLMBackend:
     name = (name or os.environ.get("VUI_LLM_BACKEND", "ollama")).lower()
-    if name == "vllm":
-        return VLLMBackend(
-            model=model or os.environ.get("VUI_VLLM_MODEL", DEFAULT_VLLM_MODEL),
-            base_url=os.environ.get("VUI_VLLM_URL", "http://localhost:8000"),
-        )
     if name == "ollama":
         return OllamaBackend(
             model=model or os.environ.get("VUI_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL),
@@ -793,14 +767,29 @@ def make_backend(name: str | None = None, model: str | None = None) -> LLMBacken
             base_url=os.environ.get("VUI_OLLAMA_URL")
             or os.environ.get("OLLAMA_URL", "http://localhost:11434"),
         )
-    if name == "litellm":
-        return LiteLLMBackend(
-            model=model or os.environ.get("VUI_LITELLM_MODEL", "openai/gpt-4o-mini"),
-            base_url=os.environ.get("VUI_LITELLM_URL", "http://localhost:4000"),
+    if name not in ("vllm", "litellm", "openai"):
+        raise ValueError(
+            f"unknown VUI_LLM_BACKEND: {name!r} "
+            "(expected 'ollama', 'vllm', 'litellm' or 'openai')"
         )
-    raise ValueError(
-        f"unknown VUI_LLM_BACKEND: {name!r} (expected 'ollama', 'vllm' or 'litellm')"
-    )
+    env = f"VUI_{name.upper()}_"
+    kwargs: dict = {
+        "api_key": os.environ.get(env + "API_KEY") or None,
+        "reasoning_effort": os.environ.get(env + "REASONING_EFFORT") or None,
+    }
+    url = os.environ.get(env + "URL")
+    model = model or os.environ.get(env + "MODEL")
+    if url:
+        kwargs["base_url"] = url
+    if model:
+        kwargs["model"] = model
+    if name == "openai":
+        if not url or not model:
+            raise ValueError(
+                "VUI_LLM_BACKEND=openai needs VUI_OPENAI_URL and VUI_OPENAI_MODEL"
+            )
+        return OpenAICompatBackend(**kwargs)
+    return (VLLMBackend if name == "vllm" else LiteLLMBackend)(**kwargs)
 
 
 _BACKEND: LLMBackend | None = None

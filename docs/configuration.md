@@ -152,12 +152,14 @@ One model: **`fluxions/vui` → `vui-nano.safetensors`** (305M params, Llama-sty
 
 ### LLM backends
 
-Two backends, selected by env var:
+Selected by env var:
 
 | Backend | `VUI_LLM_BACKEND=` | Default URL | Default model | Notes |
 |---|---|---|---|---|
 | Ollama | `ollama` (default) | `http://localhost:11434` | `qwen3.5:4b` | Default, GGUF-quantized. UI dropdown can hot-swap and pull new models. On Apple Silicon, an MLX-quantized variant (`qwen3.5-4b-mlx`) is auto-created via `ollama create --experimental --quantize int4` for ~1.9× faster decode. |
-| vLLM (or any OpenAI-compatible server) | `vllm` | `http://localhost:8000` | `Qwen/Qwen3.5-4B` | Pip-installable, so it needs no root — the backend for a [rootless install](rootless-install.md). Single model per process, so the dropdown lists one id and **Pull** is hidden. Start it with `--enable-auto-tool-choice --tool-call-parser …` or tool calls silently degrade to plain text, and set `--gpu-memory-utilization` low enough to leave room for the TTS/ASR workers on the same card. Sends Qwen-specific `chat_template_kwargs.enable_thinking=false` — set to `true` only if you want chain-of-thought (kills voice TTFB). |
+| vLLM | `vllm` | `http://localhost:8000` | `google/gemma-4-E4B-it` | Pip-installable, so it needs no root — the backend for a [rootless install](rootless-install.md). Single model per process, so the dropdown lists one id and **Pull** is hidden. Start it with `--enable-auto-tool-choice --tool-call-parser …` or tool calls silently degrade to plain text, and set `--gpu-memory-utilization` low enough to leave room for the TTS/ASR workers on the same card. Sends `chat_template_kwargs.enable_thinking=false`, which keeps Qwen3-style models from thinking before they answer (thinking kills voice TTFB). |
+| Any OpenAI-compatible API | `openai` | — | — | Hosted APIs and routers (OpenRouter, OrcaRouter, Gemini, …) or any other server. Set `VUI_OPENAI_URL`, `VUI_OPENAI_MODEL` and usually `VUI_OPENAI_API_KEY`; see [below](#pointing-at-vllm-or-any-openai-compatible-server). |
+| LiteLLM proxy | `litellm` | `http://localhost:4000` | `openai/gpt-4o-mini` | Sends standard OpenAI fields only; the proxy maps them to the provider behind each route. |
 
 The default sampling pinned in `llm_backend.py:DEFAULT_SAMPLING` (`temperature=1.0, top_k=20, top_p=0.95, presence_penalty=1.5`) mirrors the qwen3.5:4b Ollama Modelfile, so vLLM and Ollama produce comparable replies. Override per-call as needed.
 
@@ -226,11 +228,38 @@ export VUI_VLLM_MODEL="google/gemma-4-E4B-it"
 python -m vui.serving.stream
 ```
 
-The backend hits `${VUI_VLLM_URL}/v1/chat/completions`, so anything that speaks the OpenAI chat completion API (vLLM, sglang, LM Studio in server mode, llama.cpp `--api`, OpenAI itself) should work. Tools, streaming, and `usage` are decoded.
+For a hosted API or router, use `openai` with the base URL the provider documents and a key:
+
+```sh
+export VUI_LLM_BACKEND=openai
+export VUI_OPENAI_URL="https://openrouter.ai/api/v1"
+export VUI_OPENAI_MODEL="qwen/qwen3-8b"
+export VUI_OPENAI_API_KEY="sk-..."
+```
+
+`vllm`, `litellm` and `openai` are the same client with different defaults, and each reads `VUI_<NAME>_URL`, `_MODEL`, `_API_KEY` and `_REASONING_EFFORT`. The URL is either a bare host (`http://host:8000`, which gets `/v1`) or the API root as the provider documents it (`…/v1`, Gemini's `…/v1beta/openai`). The key is sent as `Authorization: Bearer …`; vLLM's `--api-key` and a LiteLLM master key work the same way.
+
+**What goes in the request.** `vllm` and `openai` send vLLM's sampling fields (`top_p`, `top_k`, `presence_penalty`, `chat_template_kwargs`) and all ten of the conversation's stop sequences. A server that rejects them with a 400 before they have ever worked gets one retry with standard fields only and the first four stop sequences, and Vui stays that way (it logs one `[llm] … using standard OpenAI fields` line). The other stop sequences are then applied as the reply streams in. `litellm` starts with standard fields.
+
+**Thinking.** Models that think before answering (Qwen3, Qwen3.5, Gemini) wreck voice latency, and with a small token budget can return no text at all. `chat_template_kwargs.enable_thinking=false` turns it off on servers that render the chat template themselves. Elsewhere set `VUI_<NAME>_REASONING_EFFORT` to the lowest value the server takes.
+
+Tested with Vui's own calls (prefill, streamed reply with stop sequences, tool routing):
+
+| Server | Backend | Notes |
+|---|---|---|
+| vLLM 0.24 | `vllm` | Everything accepted. |
+| llama.cpp `llama-server --jinja` | `vllm` | Everything accepted. |
+| mlx_lm.server 0.31 | `vllm` | Everything accepted; thinking is off only via `chat_template_kwargs`. |
+| Ollama `/v1` | `openai` | Ignores `chat_template_kwargs`: set `VUI_OPENAI_REASONING_EFFORT=none` for Qwen3.5. Prefer the native `ollama` backend. |
+| LiteLLM proxy | `litellm` | Rejects `presence_penalty` on Ollama routes. For a thinking model behind it, `VUI_LITELLM_REASONING_EFFORT=none`. |
+| Gemini (`…/v1beta/openai`) | `openai` | Rejects `top_k`, `presence_penalty` and more than 5 stop sequences, so the first request falls back. `VUI_OPENAI_REASONING_EFFORT=minimal` (it rejects `none`). |
+
+Not tested: OpenAI itself (it caps `stop` at 4 and rejects unknown fields, which the fallback covers; its reasoning models also reject `max_tokens` and a non-default `temperature`, which it doesn't), SGLang, LM Studio.
 
 Caveats:
-- The body sets `chat_template_kwargs.enable_thinking=false`. Servers that don't recognise this key just ignore it; servers that pass it through to a non-Qwen template may complain. Patch `_body` in `llm_backend.py:VLLMBackend` if you hit issues.
-- Hot-swapping models from the UI is disabled in this mode (vLLM serves one model per process).
+- Qwen3.5's chat template rejects a system message that isn't first. The thoughts LLM adds one when tasks are in flight, so with Qwen3.5 on vLLM, llama.cpp or mlx_lm, tool routing fails while a task runs. Ollama's template doesn't have this check.
+- Vui prefills both LLMs while you speak: two 1-token requests at most every 1.5 s, once the transcript has grown by 20 characters. On a metered API each one is a billed request.
+- The UI dropdown lists what `/v1/models` returns and switches among those ids; a single-model vLLM lists one.
 
 ### docker-compose
 
@@ -250,12 +279,18 @@ environment:
 
 | Var | Default | Purpose |
 |---|---|---|
-| `VUI_LLM_BACKEND` | `ollama` | Backend select: `ollama` or `vllm`. |
+| `VUI_LLM_BACKEND` | `ollama` | Backend select: `ollama`, `vllm`, `openai` or `litellm`. |
 | `VUI_OLLAMA_URL` | `http://localhost:11434` | Ollama base URL. |
 | `OLLAMA_URL` | `http://localhost:11434` | Deprecated alias for `VUI_OLLAMA_URL`, still honoured as a fallback. Only the MLX auto-setup path reads it directly now. |
 | `VUI_OLLAMA_MODEL` | `qwen3.5:4b` | Initial Ollama model. UI can switch live. |
 | `VUI_VLLM_URL` | `http://localhost:8000` | vLLM (or OpenAI-compatible) base URL. |
 | `VUI_VLLM_MODEL` | `google/gemma-4-E4B-it` | Model id sent to vLLM. |
+| `VUI_OPENAI_URL` | none | API root of an OpenAI-compatible server, as its docs give it (`https://…/v1`). Required with `VUI_LLM_BACKEND=openai`. |
+| `VUI_OPENAI_MODEL` | none | Model id. Required with `VUI_LLM_BACKEND=openai`. |
+| `VUI_LITELLM_URL` | `http://localhost:4000` | LiteLLM proxy base URL. |
+| `VUI_LITELLM_MODEL` | `openai/gpt-4o-mini` | Model name as configured on the proxy. |
+| `VUI_{VLLM,OPENAI,LITELLM}_API_KEY` | unset | Sent as `Authorization: Bearer …`. |
+| `VUI_{VLLM,OPENAI,LITELLM}_REASONING_EFFORT` | unset | Sent as `reasoning_effort`; the lowest value the server takes turns thinking off (`none`, or `minimal` on Gemini). |
 | `VUI_DTYPE` | auto | Force the model dtype: `bf16`, `fp16`, `fp32`. Auto-selects bf16 on compute 8.0+, fp16 below that, fp32 without CUDA. Use `fp32` if fp16's narrower exponent range produces NaNs. |
 | `VUI_ATTN` | auto | `torch` (or `sdpa`) forces the pure-PyTorch attention fallback instead of FlashAttention-2. Auto-selected anyway below compute 8.0. |
 | `UV_TORCH_BACKEND` | unset | Which CUDA build of torch `uv sync` installs (`auto`, `cu126`, `cu130`, `cpu`, …). `install.sh` sets it from the detected GPU. The default build covers sm_75+, so this only matters below Turing, which needs `cu126`. Requires a recent uv; older versions ignore it. |
