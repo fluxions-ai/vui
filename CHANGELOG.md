@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-10-02
+
 ### Added
 
 - **Any OpenAI-compatible API as the LLM, hosted ones included.**
