@@ -433,6 +433,7 @@ class CodecCtx:
         self._buf: Tensor | None = None  # (B, Q, T) rolling buffer
         self._stack: ExitStack | None = None  # holds decoder.streaming() ctx
         self._frames_since_prefill = 0  # bumped per decode_frame; resets on prefill
+        self._abs_frames = 0  # frames in the stream so far; _buf is trimmed, this isn't
         self._prefill_n_codebooks = 0
 
     def set_prompt(self, codes: Tensor):
@@ -440,15 +441,43 @@ class CodecCtx:
             codes = codes.unsqueeze(0)
         self._prompt_len = codes.shape[2]
         self._buf = codes
+        self._abs_frames = codes.shape[2]
         # Buffer changed → drop any prior streaming state so the next
         # decode_frame seeds from this new prompt (or starts cold).
         self._close_stack()
 
     def add(self, codes: Tensor):
-        """Add codes to buffer without decoding. For KV-cached streaming path."""
+        """Add codes to buffer without decoding. For KV-cached streaming path.
+
+        The codes are part of the stream (user audio between replies), so they
+        count towards the 10s clock, and an open decoder state is advanced
+        over them so the next reply continues from them. The server adds user
+        audio chunk by chunk while the user speaks, which keeps this work off
+        the reply's first frame.
+        """
         if codes.dim() == 2:
             codes = codes.unsqueeze(0)
         self._append(codes)
+        if self._stack is not None:
+            self._advance(codes)
+
+    def _advance(self, codes: Tensor) -> None:
+        """Run the decoder state over `codes` as decode_frame would; the audio is dropped.
+
+        Only the frames after the last 10s boundary they cross reach the
+        decoder: the boundary's hard reset would drop the rest.
+        """
+        dev = codes.device if codes.is_cuda else "cuda"
+        T = codes.shape[2]
+        total = self._frames_since_prefill + T
+        if total >= self.max_ctx:
+            self._hard_reset(device=dev)
+            codes = codes[:, :, T - total % self.max_ctx :]
+        if codes.shape[2] > 0:
+            if self._prefill_n_codebooks > 0:
+                codes = codes[:, : self._prefill_n_codebooks]
+            self.decoder(codes)
+        self._frames_since_prefill = total % self.max_ctx
 
     @property
     def n_frames(self) -> int:
@@ -487,10 +516,12 @@ class CodecCtx:
                 if codes.shape[1] != min_q:
                     codes = codes[:, :min_q].contiguous()
             self._buf = torch.cat([self._buf, codes], dim=2)
-        # Trim to 2x max_ctx to bound memory
-        limit = self.max_ctx * 2
+        self._abs_frames += codes.shape[2]
+        # Trim to bound memory, keeping the prompt and a full max_ctx after
+        # it: _reseed seeds from up to max_ctx - 1 frames of the tail.
+        limit = max(self.max_ctx * 2, self._prompt_len + self.max_ctx)
         if self._buf.shape[2] > limit:
-            if self._prompt_len > 0 and self._prompt_len < limit:
+            if self._prompt_len > 0:
                 self._buf = torch.cat(
                     [
                         self._buf[:, :, : self._prompt_len],
@@ -571,10 +602,12 @@ class CodecCtx:
         anywhere else — or carrying continuation context past `k * max_ctx`
         — is out of distribution.
 
-        Concretely: `_frames_since_prefill` is set to `buf_size % max_ctx`
+        Concretely: `_frames_since_prefill` is set to `abs_frames % max_ctx`
         after this call, so the boundary check `_fsp >= max_ctx` next fires
-        at absolute frame `(buf_size // max_ctx + 1) * max_ctx` — the next
+        at absolute frame `(abs_frames // max_ctx + 1) * max_ctx` — the next
         encoder boundary, where the AR will emit fresh-start codes.
+        `abs_frames` counts every frame since the prompt, including the user
+        codes passed to `add()`, which `_buf` stops doing once trimmed.
 
         Wrapped in inference_mode so persistent state buffers (which are
         inference tensors after setup_streaming_graph) can be mutated.
@@ -589,14 +622,14 @@ class CodecCtx:
     def _reseed(self, device: str | torch.device = "cuda") -> None:
         """Seed state with the partial-window tail of `_buf`.
 
-        Feeds `buf_size % max_ctx` codes through the decoder so the codec
-        position lands at `buf_size % max_ctx` — aligned with the absolute
+        Feeds `abs_frames % max_ctx` codes through the decoder so the codec
+        position lands at `abs_frames % max_ctx` — aligned with the absolute
         audio frame index modulo `max_ctx`. See `prefill` docstring for why.
         """
         if self._buf is None or self._buf.shape[2] == 0:
             self._frames_since_prefill = 0
             return
-        n = self._buf.shape[2] % self.max_ctx
+        n = self._abs_frames % self.max_ctx
         if n == 0:
             self._frames_since_prefill = 0
             return
@@ -640,8 +673,8 @@ class CodecCtx:
             codes = codes.unsqueeze(0)
         dev = codes.device if codes.is_cuda else "cuda"
         if self._stack is None:
-            # No prior prefill — auto-enter streaming context, start cold.
-            self._hard_reset(device=dev)
+            # Never prefilled: seed from the buffer as prefill does.
+            self.prefill(self._prefill_n_codebooks, device=dev)
             audio = self.decoder(codes)
         elif self._frames_since_prefill >= self.max_ctx:
             # 10s boundary: training encoded in independent 10s chunks, so
@@ -665,6 +698,7 @@ class CodecCtx:
         self._prompt_len = 0
         self._buf = None
         self._frames_since_prefill = 0
+        self._abs_frames = 0
         self._close_stack()
 
 

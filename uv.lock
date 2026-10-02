@@ -2051,7 +2051,7 @@ wheels = [
 
 [[package]]
 name = "vui-tts"
-version = "1.1.4"
+version = "1.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "einops" },
