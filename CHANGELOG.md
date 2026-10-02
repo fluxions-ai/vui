@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-10-02
+
+### Changed
+
+- **torch range extended to 2.14.** Pipecat now locks torch 2.14, which the
+  1.2.0 ceiling (`<2.14`) split its lock over. Consumers now get
+  `torch>=2.11,<2.15` / `torchcodec>=0.11,<0.18` (torchcodec 0.12 onwards
+  runs on any torch >= 2.11, so the old minor-for-minor cap was tighter than
+  needed); the checkout lock is unchanged (2.11).
+
 ## [1.2.0] - 2026-10-02
 
 ### Added
