@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Row.truncate(offset)`: move the KV back to any offset between the end of
+  the prompt and `row.offset`, e.g. to drop an interrupted reply. At the end
+  of the prompt it re-seeds the codec context as `rewind()` does; past it the
+  codec context is left as it is. Offsets outside that range raise
+  `ValueError`. On both engines.
+- **Official voices through the public API, on both engines.**
+  `vui.prompt_files.load_official_prompt` returns the pre-baked transcript,
+  codes, speaker token and conditioning bias as torch tensors, and
+  `Row.prefill` takes the lot: `spk_emb=` accepts a `(1, 1, d_model)` tensor
+  as an already-projected token, and the new `cond_bias=` sets the engine's
+  conditioning bias. Until now a CUDA caller had to set `row._spk_token` and
+  `model._cond_bias` by hand, and the token set that way was never written
+  before the prompt segments.
+
+### Changed
+
+- `vui.mlx.engine.load_official_prompt` wraps `vui.prompt_files.load_official_prompt`
+  and returns the same data as MLX arrays.
+- `Row.reset()` also clears the end-of-prompt offset, so a later `rewind()`
+  no longer jumps back to a prompt that is gone.
+- `Row.add_user` no longer prints each user turn (with the first 40
+  characters of what the user said) to stdout; the line goes to the
+  `vui.engine` logger at DEBUG level, so an application embedding the engine
+  keeps transcripts out of its output unless it asks for them.
+
 ## [1.1.4] - 2026-09-12
 
 ### Added

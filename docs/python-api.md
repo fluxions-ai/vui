@@ -50,6 +50,23 @@ AudioEncoder(audio.squeeze().cpu().float().unsqueeze(0), sample_rate=SR) \
 
 `row.render()` returns `(codes (T, Q), audio (1, 1, S))`. The audio is already decoded through the Qwen codec; if you only need the raw codec codes (e.g. to ship across the wire and decode elsewhere), use `engine._render_row(row, text, cfg)` and skip the vocoder.
 
+## Official voices (no encoder needed)
+
+The official voices (`maeve`, `abraham`, `rhian`, `harry`) ship pre-baked for each checkpoint: transcript, codes, speaker token and conditioning bias. `load_official_prompt` downloads the set baked for your engine's checkpoint, and `prefill` takes all four:
+
+```python
+from vui.engine import Engine, GenConfig, Segment
+from vui.prompt_files import load_official_prompt
+
+engine = Engine()
+text, codes, spk_token, cond_bias = load_official_prompt("maeve", checkpoint=engine.checkpoint)
+with engine.new_row() as row:
+    row.prefill([Segment(text, codes)], spk_emb=spk_token, cond_bias=cond_bias)
+    codes_out, audio = row.render("Hello!", GenConfig(temperature=0.7))
+```
+
+The speaker token and bias only fit the checkpoint they were baked for, hence `checkpoint=engine.checkpoint`. The bias is engine-wide: with several rows, the last prefill that passes one sets it for all of them. A prefill without one keeps it, so call `engine.set_conditioning()` to zero it before switching to a cloned voice. This runs unchanged on Apple Silicon.
+
 ## Properly chunked prompts (long voice references)
 
 The minimal example above works for prompts under ~15 seconds. **For longer references — and you want longer, the model improves up to a couple of minutes — you have to chunk.** Stuffing a single 60-second `(text, codes)` segment into prefill destroys the model's per-segment speaker prefix and the output drifts off the speaker.
@@ -161,6 +178,7 @@ Notes:
 - Pass a `cancel=threading.Event()` (or any `.is_set()`-able object) to abort mid-generation; the loop checks per frame and exits cleanly.
 - `reset_rep=False` keeps the repetition-penalty history across multiple `.stream()` calls — useful when you feed LLM chunks one at a time and want rep-penalty to span the full turn.
 - `row.rewind()` returns the KV to end-of-prompt without re-prefilling, so you can render another turn with the same speaker prefix already cached.
+- `row.truncate(offset)` moves the KV back to `offset`, anywhere from the end of the prompt to `row.offset`. Note `row.offset` before a turn and truncate to it to drop that turn, e.g. a reply the listener interrupted. To keep the part they heard instead: a frame is written to the KV when the next one is generated, so the `row.offset` read as frame *i* is yielded, plus one, keeps frames up to *i* (cap it at `row.offset`).
 
 ## Continuous batching (many concurrent renders)
 
@@ -231,24 +249,11 @@ The `ctx=6` parameter prepends 6 frames (~500ms) of codec context to smooth chun
 
 **Status:** TTS inference on MLX is working — quantized vui-nano-1.1 renders voice-prompted speech end-to-end at ~1.5× real-time on M4, and `load_quantized` auto-downloads the pre-baked int8/int4 weights (no torch float32-load-and-quantize step; torch is still used to encode prompt audio). The wider MLX stack (ASR, streaming-server integration) is still WIP.
 
-**`Engine()` works here.** On a machine without CUDA, `Engine()` returns `vui.mlx.engine.MLXEngine`, which implements the same Row API (`prefill` / `add_user` / `render` / `stream` / `rewind` / `reset`) backed by MLX — so the minimal example above runs unchanged. What differs from the CUDA engine:
+**`Engine()` works here.** On a machine without CUDA, `Engine()` returns `vui.mlx.engine.MLXEngine`, which implements the same Row API (`prefill` / `add_user` / `render` / `stream` / `rewind` / `reset` / `truncate`) backed by MLX — so the minimal and [official-voice](#official-voices-no-encoder-needed) examples above run unchanged. What differs from the CUDA engine:
 
 - **Single row only.** `max_rows` must be 1; continuous batching (`render_continuous` / `render_all`) and two-speaker prefill are CUDA-only.
 - **No gates.** The entropy gate (`gate_frames`) and babble probe gate aren't wired up; those `GenConfig` fields are ignored. Repetition-penalty state is per-chunk rather than per-render-call.
 - **Precision.** Loads int8 quantized weights by default (`VUI_MLX_PRECISION=float32|int8|int4` to override); the pre-baked weights auto-download on first run.
-- **Official voices need no torch encoder.** `vui.mlx.engine.load_official_prompt("maeve")` returns `(transcript, codes, spk_token, cond_bias)` from the pre-baked HF prompt safetensors:
-
-```python
-from vui.engine import Engine, GenConfig, Segment
-from vui.mlx.engine import load_official_prompt
-
-engine = Engine()
-text, codes, spk_token, cond_bias = load_official_prompt("maeve")
-engine.cond_bias = cond_bias
-with engine.new_row() as row:
-    row.prefill([Segment(text=text, codes=codes)], spk_emb=spk_token)
-    codes_out, audio = row.render("Hello!", GenConfig(temperature=0.7))
-```
 
 For arbitrary voice prompts, build segments with `build_prompt_segments` as on CUDA — encoding prompt audio still uses the torch codec encoder (CPU is fine). The lower-level primitives (`vui.mlx.tts.generate`, `vui.mlx.tts.stream.TTSStream`) remain available for custom loops.
 

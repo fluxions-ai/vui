@@ -23,6 +23,7 @@ Usage (batched, B=N):
 
 from __future__ import annotations
 
+import logging
 import os
 from collections import deque
 from collections.abc import Iterator
@@ -38,6 +39,8 @@ from vui.model import Vui
 from vui.qwen_codec import FRAME_RATE
 from vui.qwen_codec import SAMPLE_RATE as QWEN_SR
 from vui.qwen_codec import CodecCtx, QwenCodecDecoder
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_WPS = 3.0  # fallback words-per-second when prompt_wps unavailable
 
@@ -194,18 +197,30 @@ class Row:
         spk_emb: Tensor | None = None,
         segments_2: list[Segment] | None = None,
         spk_emb_2: Tensor | None = None,
+        *,
+        cond_bias: Tensor | None = None,
     ) -> int:
         """Prefill this row with `[spk] text_i codes_i` for each segment.
 
         spk_emb is projected once via model.embed_speaker and re-injected
-        before every segment's text (matching training chunk format).
+        before every segment's text (matching training chunk format). A
+        (1, 1, d_model) tensor is taken as an already-projected token — the
+        `spk_token_emb` an official prompt ships — and used as is, as the
+        MLX engine does.
+
+        `cond_bias` is the prompt's baked conditioning bias. It is
+        engine-wide: every row renders with the last one passed. None leaves
+        it as it is, so a cloned voice prefilled after an official one keeps
+        the official bias; `set_conditioning()` with no arguments zeroes it.
 
         For two-speaker conversations, pass `segments_2` + `spk_emb_2`; both
         speakers are prefilled in order, and the stream/render loop alternates
         between them on each `[SC]` chunk. Sets self._prompt_offset to the
         new offset (used by rewind()).
         """
-        return self._engine._prefill_row(self, segments, spk_emb, segments_2, spk_emb_2)
+        return self._engine._prefill_row(
+            self, segments, spk_emb, segments_2, spk_emb_2, cond_bias=cond_bias
+        )
 
     def add_user(
         self, text: str = "", codes: Tensor | None = None, *, final: bool = True
@@ -264,6 +279,21 @@ class Row:
     def reset(self) -> int:
         """Rewind KV to 0."""
         return self._engine._rewind_row(self, 0)
+
+    def truncate(self, offset: int) -> int:
+        """Rewind KV to `offset`, between the end of the prompt and `self.offset`.
+
+        E.g. back to a `row.offset` noted before a turn, to drop that turn.
+        At the end of the prompt the codec context is re-seeded as `rewind()`
+        does; past it the codec context is left as it is, its buffer still
+        holding the frames generated past `offset`.
+        """
+        if not self._prompt_offset <= offset <= self.offset:
+            raise ValueError(
+                f"offset {offset} is outside {self._prompt_offset}..{self.offset} "
+                "(end of prompt..row offset); reset() clears the prompt"
+            )
+        return self._engine._rewind_row(self, offset)
 
     def close(self) -> None:
         """Release the slot back to the engine's free pool."""
@@ -761,6 +791,7 @@ class Engine:
         # alone: its streaming state can't be positioned arbitrarily, and the
         # buffer still holds the user audio added since the prompt.
         if offset == 0:
+            row._prompt_offset = 0
             row._prompt_codes = None
             row._codec_ctx.reset()
         elif offset == row._prompt_offset and row._prompt_codes is not None:
@@ -823,7 +854,11 @@ class Engine:
         return self.model.embed_audio(pc).to(self.dtype)
 
     def _embed_speaker(self, spk_emb: Tensor | None) -> Tensor | None:
-        if spk_emb is None or self.model.spk_proj is None:
+        if spk_emb is None:
+            return None
+        if spk_emb.dim() == 3 and spk_emb.shape[-1] == self.D:
+            return spk_emb.to(self.device, self.dtype)  # pre-projected token (official prompts)
+        if self.model.spk_proj is None:
             return None
         return self.model.embed_speaker(spk_emb).to(self.dtype)
 
@@ -853,6 +888,8 @@ class Engine:
         spk_emb: Tensor | None,
         segments_2: list[Segment] | None = None,
         spk_emb_2: Tensor | None = None,
+        *,
+        cond_bias: Tensor | None = None,
     ) -> int:
         """Prefill [spk] text codes ... into a row, starting from its current offset.
 
@@ -884,6 +921,8 @@ class Engine:
             row._prompt_codes = None
 
         with torch.inference_mode(), sdpa_kernel([SDPBackend.MATH]):
+            if cond_bias is not None:
+                self._cond_bias.copy_(cond_bias.reshape(1, 1, -1))
             # Always end each speaker's block with [SC] before its last audio:
             # matches training (streamed_tts) where [SC] is appended to a turn's
             # text whenever the next turn is a different speaker. For speaker 1
@@ -925,11 +964,15 @@ class Engine:
                 n_codes = codes.shape[0]
                 self._prefill_emb(row, self._audio_emb(codes))
                 row._codec_ctx.add(codes.T.unsqueeze(0).to(self.device))
-        sc = "+[SC]" if final else ""
-        print(
-            f"[Engine._add_user] T={T0}->{row.offset} "
-            f"text={n_text}tok{sc} codes={n_codes}f "
-            f"'{text[:40]}'"
+        # Debug level: the excerpt is what the user said.
+        logger.debug(
+            "[Engine._add_user] T=%d->%d text=%dtok%s codes=%df '%s'",
+            T0,
+            row.offset,
+            n_text,
+            "+[SC]" if final else "",
+            n_codes,
+            text[:40],
         )
         return row.offset
 

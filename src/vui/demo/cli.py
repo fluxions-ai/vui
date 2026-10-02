@@ -134,16 +134,16 @@ def _mlx_prompt(engine, row, prompt_file: str) -> bool:
     use the pre-baked HF safetensors; other wavs are encoded locally with the
     torch codec encoder + a sibling .txt transcript (mlx_whisper if missing)."""
     from vui.engine import Segment
-    from vui.mlx.engine import load_official_prompt
+    from vui.prompt_files import load_official_prompt
 
     voice = Path(prompt_file).stem
     try:
         text, codes, spk_token, cond_bias = load_official_prompt(
             voice, checkpoint=getattr(engine, "checkpoint", None)
         )
-        if cond_bias is not None:
-            engine.cond_bias = cond_bias
-        row.prefill([Segment(text=text, codes=codes)], spk_emb=spk_token)
+        row.prefill(
+            [Segment(text=text, codes=codes)], spk_emb=spk_token, cond_bias=cond_bias
+        )
         print(f"  Prompt '{voice}': '{text[:60]}' ({codes.shape[0]} frames)")
         return True
     except Exception:
