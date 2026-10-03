@@ -65,7 +65,17 @@ with engine.new_row() as row:
     codes_out, audio = row.render("Hello!", GenConfig(temperature=0.7))
 ```
 
-The speaker token and bias only fit the checkpoint they were baked for, hence `checkpoint=engine.checkpoint`. The bias is engine-wide: with several rows, the last prefill that passes one sets it for all of them. A prefill without one keeps it, so call `engine.set_conditioning()` to zero it before switching to a cloned voice. This runs unchanged on Apple Silicon.
+The speaker token and bias only fit the checkpoint they were baked for, hence `checkpoint=engine.checkpoint`. The bias is engine-wide: with several rows, the last prefill that passes one sets it for all of them. A prefill without one keeps it, so call `engine.set_conditioning()` to zero it before switching to a cloned voice (see [Conditioning](#conditioning)). This runs unchanged on Apple Silicon.
+
+## Conditioning
+
+`engine.set_conditioning(sq_scores=..., wps_score=...)` sets one bias that is added to the text the voice speaks. Each call replaces the whole bias, including one an official voice's `prefill(cond_bias=...)` set. It is engine-wide, and `stream()` / `render()` need `Engine(max_rows=1)`, so in a live conversation it is effectively per conversation.
+
+What it does depends on the checkpoint. On **`vui-nano-1.1`** (the default):
+
+- **Speaking rate (`wps_score`) is the control 1.1 was tuned with.** Its RL conditioned every batch on a target rate between 2.5 and 4.0 words per second, so `engine.set_conditioning(wps_score=3.0)` asks for that rate. `0` (the default) leaves the rate unconditioned.
+- **Quality scores (`sq_scores`) make no measurable difference.** 1.1's RL ran with them off, and on cloned voices zero and the official voices' setting measured the same on WER, audio quality and speaker similarity. Leave them unset.
+- **Cloned voices: zero.** `engine.set_conditioning()` with no arguments zeroes the bias. The `cond_bias` the official voices ship is a quality bias: harmless, and it carries no rate. To use a rate with an official voice, call `set_conditioning(wps_score=...)` after its prefill.
 
 ## Properly chunked prompts (long voice references)
 
