@@ -178,6 +178,11 @@ class Row:
         self._spk_token_2: Tensor | None = None  # optional 2nd speaker
         self._active_speaker = 0  # 0 or 1 — flipped on [SC] chunks
         self._codec_ctx = CodecCtx(engine.codec)
+        # One (KV offset, codec frame count) per run of audio frames since the
+        # prompt, in stream order: where a user turn's codes or a reply chunk's
+        # frames start, in the KV and in the codec. truncate() reads it to take
+        # the frames past its offset out of the codec context too.
+        self._audio_runs: list[tuple[int, int]] = []
         self._closed = False
         self.prompt_wps: float = 0.0
 
@@ -285,8 +290,9 @@ class Row:
 
         E.g. back to a `row.offset` noted before a turn, to drop that turn.
         At the end of the prompt the codec context is re-seeded as `rewind()`
-        does; past it the codec context is left as it is, its buffer still
-        holding the frames generated past `offset`.
+        does; past it the codec context drops the frames past `offset`, user
+        codes included, so its 10 s clock counts only the audio the KV keeps,
+        and the next `stream()` re-seeds the decoder from the frames kept.
         """
         if not self._prompt_offset <= offset <= self.offset:
             raise ValueError(
@@ -766,6 +772,7 @@ class Engine:
         self._rows.pop(row.idx, None)
         self._free.add(row.idx)
         row._codec_ctx.reset()
+        row._audio_runs.clear()
 
     def reset(self) -> None:
         """Release all rows and zero the flash KV seq_lens.
@@ -786,17 +793,41 @@ class Engine:
         # voice prompt on rewind(), empty on reset(). Otherwise the next turn's
         # first frames are vocoded against the previous turn's tail (the MLX
         # engine has always re-warmed here; the streaming server's TTSEngine
-        # adapter did it by hand). A rewind to any other offset — the server's
-        # cancel path trimming back to mid-conversation — leaves the codec
-        # alone: its streaming state can't be positioned arbitrarily, and the
-        # buffer still holds the user audio added since the prompt.
+        # adapter did it by hand). A rewind to any other offset — truncate()
+        # after a barge-in, the server's cancel path — drops the frames the KV
+        # no longer holds, so the decoder's 10 s clock keeps following the
+        # stream the next reply continues.
         if offset == 0:
             row._prompt_offset = 0
             row._prompt_codes = None
             row._codec_ctx.reset()
+            row._audio_runs.clear()
         elif offset == row._prompt_offset and row._prompt_codes is not None:
             row._codec_ctx.set_prompt(row._prompt_codes)
+            row._audio_runs.clear()
+        else:
+            self._drop_audio_past(row, offset)
         return offset
+
+    def _mark_audio_run(self, row: Row, kv_start: int) -> None:
+        """Note that the next frames the row's codec takes sit in the KV from `kv_start` on."""
+        frames = row._codec_ctx._abs_frames
+        if row._audio_runs and row._audio_runs[-1][1] == frames:
+            # The last run got no frame: a chunk the gate re-rolled.
+            row._audio_runs[-1] = (kv_start, frames)
+        else:
+            row._audio_runs.append((kv_start, frames))
+
+    def _drop_audio_past(self, row: Row, offset: int) -> None:
+        """Take the codec frames at KV positions from `offset` on out of the row's codec."""
+        kept = end = row._codec_ctx._abs_frames
+        for kv_start, start in reversed(row._audio_runs):
+            if kv_start < offset:
+                kept = min(end, start + offset - kv_start)
+                break
+            kept = end = start
+        row._audio_runs = [run for run in row._audio_runs if run[0] < offset]
+        row._codec_ctx.drop(row._codec_ctx._abs_frames - kept)
 
     # ------------------------------------------------------------------
     # Conditioning
@@ -919,6 +950,7 @@ class Engine:
             row._codec_ctx.set_prompt(row._prompt_codes)
         else:
             row._prompt_codes = None
+        row._audio_runs.clear()  # truncate() stops at the end of this prompt
 
         with torch.inference_mode(), sdpa_kernel([SDPBackend.MATH]):
             if cond_bias is not None:
@@ -962,6 +994,7 @@ class Engine:
             n_codes = 0
             if codes is not None:
                 n_codes = codes.shape[0]
+                self._mark_audio_run(row, row.offset)
                 self._prefill_emb(row, self._audio_emb(codes))
                 row._codec_ctx.add(codes.T.unsqueeze(0).to(self.device))
         # Debug level: the excerpt is what the user said.
@@ -1612,6 +1645,8 @@ class Engine:
                     hidden = self._add_agent_text(
                         row, chunk["text"], final=is_last_chunk
                     )  # (d,)
+                    # The chunk's frames follow its text in the KV, one per position.
+                    self._mark_audio_run(row, row.offset)
 
                     cb0 = model.codec_head(hidden.unsqueeze(0))
                     cb0 = self._rep_apply(cb0, cfg.rep_penalty)

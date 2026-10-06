@@ -5,6 +5,7 @@ The engine is faked down to the one row's KV length and its codec context, so
 this runs on any box, CPU-only CI included.
 """
 
+import contextlib
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,7 @@ class _FakeEngine:
     """The KV bookkeeping a Row drives: one row's seq_len, no model."""
 
     _rewind_row = Engine._rewind_row
+    _drop_audio_past = Engine._drop_audio_past
 
     def __init__(self):
         self.codec = None
@@ -40,7 +42,7 @@ def _row(written: int, prompt_offset: int = 40) -> Row:
 # ---------------------------------------------------------------- truncate
 
 
-def test_truncate_moves_the_kv_back_and_leaves_the_codec_buffer():
+def test_truncate_with_no_audio_past_the_offset_leaves_the_codec_buffer():
     row = _row(written=100)
     buf = row._codec_ctx._buf
 
@@ -141,6 +143,7 @@ class _FakeUserEngine(_FakeEngine):
     """Writes a user turn's embeddings by advancing the row's KV length."""
 
     _add_user = Engine._add_user
+    _mark_audio_run = Engine._mark_audio_run
 
     def __init__(self):
         super().__init__()
@@ -225,3 +228,111 @@ def test_prefill_without_a_cond_bias_leaves_it():
     _prefill(engine)
 
     assert (engine._cond_bias == 1).all()
+
+
+# ------------------------------------------------- truncate and the codec
+
+
+class _Decoder:
+    """A streaming codec decoder that decodes nothing."""
+
+    def streaming(self, batch_size: int):
+        return contextlib.nullcontext()
+
+    def __call__(self, codes: torch.Tensor) -> torch.Tensor:
+        return torch.zeros(1, 1, codes.shape[2])
+
+
+class _FakeStreamEngine(_FakePrefillEngine):
+    """The prefill and user-turn paths, plus what `_stream_row` does to the KV and the codec."""
+
+    def __init__(self):
+        super().__init__()
+        self.codec = _Decoder()
+
+    def reply(self, row: Row, n_text: int, n_frames: int) -> list[int]:
+        """Write a chunk's text, then one KV position and one codec frame per frame.
+
+        Returns `row.offset` as each frame is yielded, as a barge-in caller notes it.
+        """
+        kv = self.model.decoder.flash_kv_caches[0].seq_lens
+        kv[row.idx] += n_text
+        self._mark_audio_run(row, row.offset)
+        if row._codec_ctx._stack is None:
+            row._codec_ctx.prefill(device="cpu")
+        offsets = []
+        for _ in range(n_frames):
+            offsets.append(row.offset)
+            row._codec_ctx.decode_frame(torch.zeros(1, Q, 1, dtype=torch.long))
+            kv[row.idx] += 1
+        return offsets
+
+
+def _conversation() -> tuple[_FakeStreamEngine, Row, list[int]]:
+    """A 6-frame prompt, a user turn with 5 frames, then a 20-frame reply in two chunks."""
+    engine = _FakeStreamEngine()
+    row = _prefill(engine)
+    row.add_user("hello there", torch.zeros(5, Q, dtype=torch.long))
+    offsets = engine.reply(row, n_text=3, n_frames=12) + engine.reply(row, 4, 8)
+    assert row._codec_ctx._abs_frames == 6 + 5 + 20
+    return engine, row, offsets
+
+
+def test_truncate_takes_the_frames_past_the_offset_out_of_the_codec():
+    _, row, offsets = _conversation()
+    heard = 15  # into the second chunk
+
+    row.truncate(min(offsets[heard - 1] + 1, offsets[heard]))
+
+    ctx = row._codec_ctx
+    assert ctx._abs_frames == 6 + 5 + heard
+    assert ctx.n_frames == 6 + 5 + heard
+    assert ctx._stack is None  # the next stream() re-seeds from the frames kept
+
+
+def test_truncate_at_a_chunk_boundary_keeps_the_whole_first_chunk():
+    _, row, offsets = _conversation()
+
+    row.truncate(min(offsets[11] + 1, offsets[12]))
+
+    assert row._codec_ctx._abs_frames == 6 + 5 + 12
+
+
+def test_truncate_before_the_reply_keeps_the_user_codes():
+    _, row, offsets = _conversation()
+
+    row.truncate(offsets[0] - 3)  # the reply's first text, before its audio
+
+    assert row._codec_ctx._abs_frames == 6 + 5
+
+
+def test_truncate_into_the_user_audio_keeps_the_frames_before_the_offset():
+    engine = _FakeStreamEngine()
+    row = _prefill(engine)
+    row.add_user("hello there", torch.zeros(5, Q, dtype=torch.long))
+
+    row.truncate(row.offset - 2)
+
+    assert row._codec_ctx._abs_frames == 6 + 3
+
+
+def test_a_chunk_rerolled_before_any_frame_opens_one_run():
+    engine, row, _ = _conversation()
+    runs = len(row._audio_runs)
+
+    engine._mark_audio_run(row, row.offset)
+    engine._mark_audio_run(row, row.offset)
+
+    assert len(row._audio_runs) == runs + 1
+
+
+def test_rewind_and_prefill_forget_the_audio_runs():
+    engine, row, _ = _conversation()
+
+    row.rewind()
+    assert row._audio_runs == []
+    assert row._codec_ctx._abs_frames == 6
+
+    engine.reply(row, 3, 4)
+    row.reset()
+    assert row._audio_runs == []

@@ -461,6 +461,23 @@ class CodecCtx:
         if self._stack is not None:
             self._advance(codes)
 
+    def drop(self, n: int) -> None:
+        """Take the last `n` frames back out of the stream, as `Row.truncate` does to the KV.
+
+        `_abs_frames` goes back by `n` and the decoder state is closed, so the
+        next decode re-seeds on the 10 s grid from the frames kept (see
+        `prefill`). Frames the buffer has already trimmed count in `n`; the
+        prompt is never dropped.
+        """
+        if n <= 0:
+            return
+        held = self._buf.shape[2] - self._prompt_len if self._buf is not None else 0
+        cut = min(n, held)
+        if cut > 0:
+            self._buf = self._buf[:, :, :-cut]
+        self._abs_frames -= n
+        self._close_stack()
+
     def _advance(self, codes: Tensor) -> None:
         """Run the decoder state over `codes` as decode_frame would; the audio is dropped.
 
@@ -517,9 +534,11 @@ class CodecCtx:
                     codes = codes[:, :min_q].contiguous()
             self._buf = torch.cat([self._buf, codes], dim=2)
         self._abs_frames += codes.shape[2]
-        # Trim to bound memory, keeping the prompt and a full max_ctx after
-        # it: _reseed seeds from up to max_ctx - 1 frames of the tail.
-        limit = max(self.max_ctx * 2, self._prompt_len + self.max_ctx)
+        # Trim to bound memory, keeping the prompt and 40 s of tail after it:
+        # _reseed seeds from up to max_ctx - 1 frames of the tail, and after
+        # drop() takes back a reply of up to 30 s (GenConfig.max_secs) those
+        # frames must still be there.
+        limit = self._prompt_len + self.max_ctx * 4
         if self._buf.shape[2] > limit:
             if self._prompt_len > 0:
                 self._buf = torch.cat(
@@ -633,10 +652,18 @@ class CodecCtx:
         if n == 0:
             self._frames_since_prefill = 0
             return
-        seed = self._buf[:, :, -n:].to(device)
-        if self._prefill_n_codebooks > 0:
-            seed = seed[:, : self._prefill_n_codebooks]
-        self.decoder(seed)
+        # Once trimmed, the buffer is the prompt then a tail that does not
+        # follow it. A drop() into that tail can leave fewer than n frames of
+        # it: seed from those, never from the prompt, and keep the clock at n.
+        contiguous = self._buf.shape[2]
+        if self._abs_frames > contiguous:
+            contiguous -= self._prompt_len
+        m = min(n, contiguous)
+        if m > 0:
+            seed = self._buf[:, :, -m:].to(device)
+            if self._prefill_n_codebooks > 0:
+                seed = seed[:, : self._prefill_n_codebooks]
+            self.decoder(seed)
         self._frames_since_prefill = n
 
     def _hard_reset(self, device: str | torch.device = "cuda") -> None:
