@@ -1318,6 +1318,8 @@ class TTSEngine:
             with torch.inference_mode():
                 self.engine._prefill_emb(self.row, self.engine._sc_emb)
                 if remaining_codes is not None:
+                    # As add_user does, so truncate() finds these codes in the KV.
+                    self.engine._mark_audio_run(self.row, self.row.offset)
                     self.engine._prefill_emb(
                         self.row, self.engine._audio_emb(remaining_codes)
                     )

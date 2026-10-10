@@ -82,3 +82,60 @@ def test_set_prompt_and_reset_restart_the_clock():
     assert ctx._abs_frames == 0
     _reply(ctx, 0, 10)
     assert dec.sessions[-1] == list(range(0, 10))
+
+
+def test_dropped_frames_leave_the_clock():
+    dec = _Decoder()
+    ctx = CodecCtx(dec)
+    pos = 150
+    ctx.set_prompt(_frames(0, pos))
+    ctx.add(_frames(pos, 40))
+    pos += 40
+    # A 14.9 s reply the listener interrupts after 1.5 s: Row.truncate keeps 19 frames.
+    _reply(ctx, pos, 186)
+    ctx.drop(186 - 19)
+    pos += 19
+    assert ctx._abs_frames == pos
+    assert ctx._stack is None
+    for reply, user in [(80, 40), (100, 90), (130, 0)]:
+        _reply(ctx, pos, reply)
+        pos += reply
+        if user:
+            ctx.add(_frames(pos, user))
+            pos += user
+
+    after = dec.sessions[3:]  # the sessions opened after the drop
+    assert after[0][0] == 125, "the re-seed does not start on the boundary before the cut"
+    for s in after:
+        assert s[0] % ctx.max_ctx == 0, f"session starts off a boundary at {s[0]}"
+        assert s == list(range(s[0], s[0] + len(s))), f"session {s[0]} skips frames"
+        assert len(s) <= ctx.max_ctx
+    assert after[-1][-1] == pos - 1
+
+
+def test_a_drop_into_the_trimmed_buffer_seeds_from_the_frames_left():
+    dec = _Decoder()
+    ctx = CodecCtx(dec)
+    ctx.set_prompt(_frames(0, 150))
+    ctx.add(_frames(150, 1000))  # trims the buffer to the prompt and its tail
+    held = ctx.n_frames - 150
+
+    ctx.drop(held - 50)  # back to frame 700: 50 frames of the tail are left
+    _reply(ctx, 700, 100)
+
+    # The seed wants frames 625..699; only 650..699 are left, and the prompt is
+    # not the stream there. The clock still resets on the boundary at 750.
+    assert dec.sessions[-2] == list(range(650, 750))
+    assert dec.sessions[-1] == list(range(750, 800))
+
+
+def test_a_drop_of_nothing_keeps_the_decoder_state():
+    dec = _Decoder()
+    ctx = CodecCtx(dec)
+    ctx.set_prompt(_frames(0, 100))
+    _reply(ctx, 100, 10)
+
+    ctx.drop(0)
+
+    assert ctx._stack is not None
+    assert ctx._abs_frames == 110

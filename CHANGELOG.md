@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Row.truncate` past the prompt takes the dropped frames out of the codec
+  context too (#47).** The codec kept counting every frame generated past the
+  offset, so after a barge-in cut the decoder's 10 s restarts ran ahead of the
+  audio the KV keeps for the rest of the conversation (236 frames ahead after
+  a 20 s reply cut at 1.5 s), and each reply decoded against unheard frames.
+  The row now notes where each run of audio frames sits in the KV;
+  `truncate()` drops the frames past the offset (`CodecCtx.drop`), and the
+  next `stream()` re-seeds the decoder on the grid from the frames kept.
+  Measured on vui-nano-1.1: every frame streamed after the cut matches the
+  stream decoded in independent 10 s chunks (SNR above 110 dB, from 10–20 dB
+  before). The codec buffer keeps 40 s of tail after the prompt instead of
+  10 s, so the re-seed still finds its frames after a 30 s reply is cut.
+
 ## [1.2.2] - 2026-10-02
 
 ### Added
